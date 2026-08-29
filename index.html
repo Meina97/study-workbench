@@ -514,7 +514,7 @@ function loadAll(){
   const customCourses=(custom&&custom.courses)||{};
   DB = {
     userInfo: Object.assign({nickname:'小朋友', grade:'三年级'}, get(LS.userInfo, {})),
-    settings: (function(){ let sv=get(LS.settings,{}); sv=Object.assign({pin:'1234'},sv); if(!sv.deviceId) sv.deviceId=uid(); sv.sync=Object.assign({enabled:false,config:{},room:'',status:'off',statusClass:'off'}, sv.sync||{}); return sv; })(),
+    settings: (function(){ let sv=get(LS.settings,{}); sv=Object.assign({pin:'1234'},sv); if(!sv.deviceId) sv.deviceId=uid(); sv.sync=Object.assign({enabled:false,url:'',anonKey:'',room:'',status:'off',statusClass:'off'}, sv.sync||{}); return sv; })(),
     studyAids: get(LS.studyAids, defaultStudyAids()),
     courses: get(LS.courses, defaultCourses()),
     schedule: get(LS.schedule, []),
@@ -791,7 +791,7 @@ function startTimer(key, name, category, dateStr){
   persist();
   renderCurrentView();
   startTicker();
-  initFirebaseSync();
+  initCloudSync();
 }
 function finishCurrentAndStart(key,name,category,dateStr){
   completeTimer(true);
@@ -2034,9 +2034,10 @@ function renderChildInfo(){
     +'</div>'
     +'<button class="btn btn-primary" onclick="changePin()">修改密码</button></div>'
     +'<div class="panel"><h4>☁️ 云端实时同步（推荐）</h4>'
-    +'<p style="font-size:13.5px;color:#555c7e;line-height:1.7">在 <b>MacBook</b> 和孩子 <b>iPad / 苹果台式机</b> 上分别填写<b>同一个</b>「家庭房间码」和 Firebase 配置并启用，两端即可自动实时同步（家长编辑 → 孩子几秒内看到），无需导出/导入。首次设置约 10 分钟，见「📖 设置说明」。</p>'
+    +'<p style="font-size:13.5px;color:#555c7e;line-height:1.7">在 <b>MacBook</b> 和孩子 <b>iPad / 苹果台式机</b> 上分别填写<b>同一个</b>「家庭房间码」和 Supabase 信息并启用，两端即可自动实时同步（家长编辑 → 孩子几秒内看到），无需导出/导入。首次设置约 10 分钟，见「📖 设置说明」。</p>'
     +'<div class="form-row"><label>家庭房间码（两端填同一个，如 xiaoya2026）</label><input id="syncRoom" value="'+esc(syncCfg().room)+'" placeholder="例如 xiaoya2026"></div>'
-    +'<div class="form-row"><label>Firebase 配置（JSON）</label><textarea id="syncConfig" rows="5" style="width:100%;font-family:monospace;font-size:12.5px" placeholder=\'{"apiKey":"...","authDomain":"...","databaseURL":"...","projectId":"...","appId":"..."}\'>'+esc(JSON.stringify(syncCfg().config||{},null,1))+'</textarea></div>'
+        +'<div class="form-row"><label>Supabase 项目网址（Project URL）</label><input id="syncUrl" value="'+esc(syncCfg().url||'')+'" placeholder="https://xxxx.supabase.co"></div>'
+    +'<div class="form-row"><label>anon 公开密钥（anon public key）</label><input id="syncKey" value="'+esc(syncCfg().anonKey||'')+'" placeholder="eyJhbGciOi..."></div>'
     +'<label class="check-item" style="width:fit-content"><input type="checkbox" id="syncEnable"'+(syncCfg().enabled?' checked':'')+' style="width:16px;height:16px"> 启用云端同步</label>'
     +'<div class="sync-status '+(syncCfg().statusClass||'off')+'" id="syncStatus">'+(syncCfg().status||'未启用')+'</div>'
     +'<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">'
@@ -2229,31 +2230,20 @@ function roundRect(ctx,x,y,w,h,r){
   ctx.closePath();
 }
 
-/* ================= 云端实时同步（Firebase Realtime Database） ================= */
-let syncReady=false, syncRef=null, lastCloudPush=0, firebaseApp=null, cloudPushTimer=null;
-const FIREBASE_VERSION='10.12.0';
-function syncCfg(){ return (DB.settings&&DB.settings.sync)||{enabled:false,config:{},room:''}; }
+/* ================= 云端实时同步（Supabase REST + 轮询，大陆可直连） ================= */
+let syncReady=false, syncTimer=null, cloudPushTimer=null, lastPushed=0;
+function syncCfg(){ return (DB.settings&&DB.settings.sync)||{enabled:false,url:'',anonKey:'',room:''}; }
 function mergeCustomLibrary(){
   const ca=(DB.customLibrary&&DB.customLibrary.aids)||{};
   const cc=(DB.customLibrary&&DB.customLibrary.courses)||{};
   for(const subj in ca){ (ca[subj]||[]).forEach(n=>{ if(!AID_PRESETS[subj]) AID_PRESETS[subj]=[]; if(!AID_PRESETS[subj].includes(n)) AID_PRESETS[subj].push(n); }); }
   for(const subj in cc){ (cc[subj]||[]).forEach(n=>{ if(!COURSE_PRESETS[subj]) COURSE_PRESETS[subj]=[]; if(!COURSE_PRESETS[subj].includes(n)) COURSE_PRESETS[subj].push(n); }); }
 }
-function loadFirebaseScripts(){
-  if(window.firebase) return Promise.resolve();
-  const names=['firebase-app-compat.js','firebase-auth-compat.js','firebase-database-compat.js'];
-  return new Promise((resolve,reject)=>{
-    let idx=0;
-    const next=()=>{
-      if(idx>=names.length) return resolve();
-      const sc=document.createElement('script');
-      sc.src='https://www.gstatic.com/firebasejs/'+FIREBASE_VERSION+'/'+names[idx++];
-      sc.onload=next;
-      sc.onerror=()=>reject(new Error('加载 Firebase SDK 失败，请检查网络'));
-      document.head.appendChild(sc);
-    };
-    next();
-  });
+function sbFetch(path, opts){
+  const cfg=syncCfg();
+  opts=opts||{};
+  const headers=Object.assign({'apikey':cfg.anonKey,'Authorization':'Bearer '+cfg.anonKey}, opts.headers||{});
+  return fetch(cfg.url.replace(/\/+$/,'')+'/rest/v1/'+path, Object.assign({}, opts, {headers}));
 }
 function setSyncStatus(txt, cls){
   const cfg=syncCfg(); cfg.status=txt; cfg.statusClass=cls||'off';
@@ -2285,64 +2275,70 @@ function applyCloudState(raw){
     toast('☁️ 已同步最新数据');
   }catch(e){}
 }
-function cloudPush(){
-  if(!syncReady||!syncRef) return;
+async function cloudPush(){
+  if(!syncReady) return;
+  const cfg=syncCfg();
   const data=cloudSnapshot();
-  lastCloudPush=Date.now();
-  syncRef.set({data:JSON.stringify(data), updatedAt:lastCloudPush, writer:DB.settings.deviceId||'device'}).catch(()=>{});
+  lastPushed=Date.now();
+  try{
+    await sbFetch('workbench?on_conflict=room', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'},
+      body:JSON.stringify([{room:cfg.room, data:JSON.stringify(data), updated_at:lastPushed}])
+    });
+  }catch(e){}
 }
 function scheduleCloudPush(){
-  if(!syncReady||!syncRef) return;
+  if(!syncReady) return;
   clearTimeout(cloudPushTimer);
   cloudPushTimer=setTimeout(cloudPush, 700);
 }
 function disableSync(){
   syncReady=false;
-  if(syncRef&&syncRef.off) syncRef.off();
-  syncRef=null;
+  if(syncTimer) clearInterval(syncTimer);
+  syncTimer=null;
 }
-async function initFirebaseSync(){
+async function pollCloud(){
+  if(!syncReady) return;
+  const cfg=syncCfg();
+  try{
+    const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const rows=await res.json();
+    if(rows && rows[0]){
+      const u=rows[0].updated_at||0;
+      if(u>lastPushed){ applyCloudState(rows[0].data); lastPushed=u; }
+    }else{
+      cloudPush();
+    }
+  }catch(e){}
+}
+async function initCloudSync(){
   const cfg=syncCfg();
   if(!cfg.enabled) return;
-  if(!cfg.config||!cfg.config.apiKey||!cfg.room){ setSyncStatus('配置不完整：请填写配置和房间码','bad'); return; }
+  if(!cfg.url||!cfg.anonKey||!cfg.room){ setSyncStatus('配置不完整：请填写网址、密钥和房间码','bad'); return; }
   try{
     setSyncStatus('正在连接云端…','off');
-    await loadFirebaseScripts();
-    const appName='workbench_'+String(cfg.room).replace(/\W/g,'_');
-    if(!firebaseApp || firebaseApp.name!==appName){
-      if(firebaseApp && firebaseApp.delete){ await firebaseApp.delete().catch(()=>{}); }
-      firebaseApp=firebase.initializeApp(cfg.config, appName);
-    }
-    await firebase.auth(firebaseApp).signInAnonymously();
-    const db=firebase.database(firebaseApp);
-    const roomKey=encodeURIComponent(cfg.room);
-    syncRef=db.ref('rooms/'+roomKey+'/state');
-    setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok');
+    const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
+    if(!res.ok) throw new Error('HTTP '+res.status+'（请确认 Supabase 表已创建）');
+    const rows=await res.json();
     syncReady=true;
-    syncRef.off();
-    syncRef.on('value', snap=>{
-      const v=snap.val();
-      if(!v){ cloudPush(); return; }
-      if(v.updatedAt && v.updatedAt<=lastCloudPush) return;
-      applyCloudState(v.data);
-    });
-    try{
-      const snap=await syncRef.once('value');
-      if(snap.val()) applyCloudState(snap.val().data);
-      else cloudPush();
-    }catch(e){}
+    setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok');
+    if(rows && rows[0]) applyCloudState(rows[0].data);
+    else cloudPush();
+    if(syncTimer) clearInterval(syncTimer);
+    syncTimer=setInterval(pollCloud, 4000);
   }catch(e){
     setSyncStatus('连接失败：'+(e.message||'未知错误')+'（仍可本地使用）','bad');
   }
 }
 async function syncTestConnection(){
   const cfg=syncCfg();
-  if(!cfg.config||!cfg.config.apiKey||!cfg.room){ setSyncStatus('请先填写配置和房间码','bad'); return; }
+  if(!cfg.url||!cfg.anonKey||!cfg.room){ setSyncStatus('请先填写网址、密钥和房间码','bad'); return; }
   setSyncStatus('正在测试连接…','off');
   try{
-    await loadFirebaseScripts();
-    const app=firebase.initializeApp(cfg.config, 'wbtest_'+Date.now());
-    await firebase.auth(app).signInAnonymously();
+    const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=room&limit=1');
+    if(!res.ok) throw new Error('HTTP '+res.status);
     setSyncStatus('✅ 连接成功！点击「保存并连接」启用','ok');
   }catch(e){
     setSyncStatus('❌ 连接失败：'+(e.message||'未知错误'),'bad');
@@ -2351,15 +2347,14 @@ async function syncTestConnection(){
 function saveSyncSettings(){
   const cfg=syncCfg();
   const room=document.getElementById('syncRoom').value.trim();
-  const cfgTxt=document.getElementById('syncConfig').value.trim();
+  const url=document.getElementById('syncUrl').value.trim();
+  const anon=document.getElementById('syncKey').value.trim();
   if(!room){ toast('请填写家庭房间码'); return; }
-  let parsed={};
-  if(cfgTxt){ try{ parsed=JSON.parse(cfgTxt); }catch(e){ toast('Firebase 配置不是有效的 JSON'); return; } }
-  if(!parsed.apiKey){ toast('配置缺少 apiKey，请粘贴完整的 Firebase 配置'); return; }
-  cfg.room=room; cfg.config=parsed;
+  if(!url||!anon){ toast('请填写 Supabase 网址和 anon 密钥'); return; }
+  cfg.room=room; cfg.url=url; cfg.anonKey=anon;
   cfg.enabled=document.getElementById('syncEnable').checked;
   persist();
-  if(cfg.enabled){ setSyncStatus('正在连接云端…','off'); initFirebaseSync(); }
+  if(cfg.enabled){ setSyncStatus('正在连接云端…','off'); initCloudSync(); }
   else { disableSync(); setSyncStatus('云端同步已停用','off'); }
   toast(cfg.enabled?'☁️ 正在启用云端同步':'云端同步已停用');
   renderParentCurrentTab();
