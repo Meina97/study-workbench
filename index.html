@@ -514,7 +514,7 @@ function loadAll(){
   const customCourses=(custom&&custom.courses)||{};
   DB = {
     userInfo: Object.assign({nickname:'小朋友', grade:'三年级'}, get(LS.userInfo, {})),
-    settings: (function(){ let sv=get(LS.settings,{}); sv=Object.assign({pin:'1234'},sv); if(!sv.deviceId) sv.deviceId=uid(); sv.sync=Object.assign({enabled:false,url:'',anonKey:'',room:'',status:'off',statusClass:'off'}, sv.sync||{}); return sv; })(),
+    settings: (function(){ let sv=get(LS.settings,{}); sv=Object.assign({pin:'1234'},sv); if(!sv.deviceId) sv.deviceId=uid(); sv.sync=Object.assign({enabled:false,url:'',anonKey:'',email:'',password:'',room:'',status:'off',statusClass:'off'}, sv.sync||{}); return sv; })(),
     studyAids: get(LS.studyAids, defaultStudyAids()),
     courses: get(LS.courses, defaultCourses()),
     schedule: get(LS.schedule, []),
@@ -2034,10 +2034,12 @@ function renderChildInfo(){
     +'</div>'
     +'<button class="btn btn-primary" onclick="changePin()">修改密码</button></div>'
     +'<div class="panel"><h4>☁️ 云端实时同步（推荐）</h4>'
-    +'<p style="font-size:13.5px;color:#555c7e;line-height:1.7">在 <b>MacBook</b> 和孩子 <b>iPad / 苹果台式机</b> 上分别填写<b>同一个</b>「家庭房间码」和 Supabase 信息并启用，两端即可自动实时同步（家长编辑 → 孩子几秒内看到），无需导出/导入。首次设置约 10 分钟，见「📖 设置说明」。</p>'
+    +'<p style="font-size:13.5px;color:#555c7e;line-height:1.7">在 <b>MacBook</b> 和孩子 <b>iPad / 苹果台式机</b> 上分别填写<b>同一个</b>「家庭房间码」和 Supabase 信息（网址+密钥+家庭账号）并启用，两端即可自动实时同步（家长编辑 → 孩子几秒内看到），无需导出/导入。首次设置约 10 分钟，见「📖 设置说明」。</p>'
     +'<div class="form-row"><label>家庭房间码（两端填同一个，如 xiaoya2026）</label><input id="syncRoom" value="'+esc(syncCfg().room)+'" placeholder="例如 xiaoya2026"></div>'
         +'<div class="form-row"><label>Supabase 项目网址（Project URL）</label><input id="syncUrl" value="'+esc(syncCfg().url||'')+'" placeholder="https://xxxx.supabase.co"></div>'
     +'<div class="form-row"><label>anon 公开密钥（anon public key）</label><input id="syncKey" value="'+esc(syncCfg().anonKey||'')+'" placeholder="eyJhbGciOi..."></div>'
+    +'<div class="form-row"><label>家庭账号邮箱（两端填同一个）</label><input id="syncEmail" value="'+esc(syncCfg().email||'')+'" placeholder="family@example.com" autocomplete="off"></div>'
+    +'<div class="form-row"><label>家庭账号密码（两端填同一个，不会上传云端）</label><input id="syncPass" type="password" value="" placeholder="••••••••" autocomplete="new-password"></div>'
     +'<label class="check-item" style="width:fit-content"><input type="checkbox" id="syncEnable"'+(syncCfg().enabled?' checked':'')+' style="width:16px;height:16px"> 启用云端同步</label>'
     +'<div class="sync-status '+(syncCfg().statusClass||'off')+'" id="syncStatus">'+(syncCfg().status||'未启用')+'</div>'
     +'<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">'
@@ -2230,20 +2232,44 @@ function roundRect(ctx,x,y,w,h,r){
   ctx.closePath();
 }
 
-/* ================= 云端实时同步（Supabase REST + 轮询，大陆可直连） ================= */
-let syncReady=false, syncTimer=null, cloudPushTimer=null, lastPushed=0;
-function syncCfg(){ return (DB.settings&&DB.settings.sync)||{enabled:false,url:'',anonKey:'',room:''}; }
+/* ================= 云端实时同步（Supabase + 家庭账号登录鉴权） ================= */
+let syncReady=false, syncTimer=null, cloudPushTimer=null, lastPushed=0, sbSession=null;
+function syncCfg(){ return (DB.settings&&DB.settings.sync)||{enabled:false,url:'',anonKey:'',email:'',password:'',room:''}; }
 function mergeCustomLibrary(){
   const ca=(DB.customLibrary&&DB.customLibrary.aids)||{};
   const cc=(DB.customLibrary&&DB.customLibrary.courses)||{};
   for(const subj in ca){ (ca[subj]||[]).forEach(n=>{ if(!AID_PRESETS[subj]) AID_PRESETS[subj]=[]; if(!AID_PRESETS[subj].includes(n)) AID_PRESETS[subj].push(n); }); }
   for(const subj in cc){ (cc[subj]||[]).forEach(n=>{ if(!COURSE_PRESETS[subj]) COURSE_PRESETS[subj]=[]; if(!COURSE_PRESETS[subj].includes(n)) COURSE_PRESETS[subj].push(n); }); }
 }
-function sbFetch(path, opts){
+function sbBase(){ return syncCfg().url.replace(/\/+$/,''); }
+function sbRaw(path, opts){
   const cfg=syncCfg();
   opts=opts||{};
-  const headers=Object.assign({'apikey':cfg.anonKey,'Authorization':'Bearer '+cfg.anonKey}, opts.headers||{});
-  return fetch(cfg.url.replace(/\/+$/,'')+'/rest/v1/'+path, Object.assign({}, opts, {headers}));
+  const headers=Object.assign({'apikey':cfg.anonKey}, opts.headers||{});
+  return fetch(sbBase()+path, Object.assign({},opts,{headers}));
+}
+function loadSbSession(){ try{ sbSession=JSON.parse(localStorage.getItem('g3_sbSession'))||null; }catch(e){ sbSession=null; } }
+async function ensureSbAuth(){
+  const cfg=syncCfg();
+  if(!sbSession) loadSbSession();
+  if(sbSession && sbSession.expires_at && (Date.now()/1000) < sbSession.expires_at-60) return;
+  if(sbSession && sbSession.refresh_token){
+    try{
+      const r=await sbRaw('/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:sbSession.refresh_token})});
+      if(r.ok){ sbSession=await r.json(); localStorage.setItem('g3_sbSession',JSON.stringify(sbSession)); return; }
+    }catch(e){}
+  }
+  if(!cfg.email||!cfg.password) throw new Error('请填写家庭账号邮箱和密码');
+  const r=await sbRaw('/auth/v1/token?grant_type=password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:cfg.email,password:cfg.password})});
+  if(!r.ok) throw new Error('登录失败：请检查邮箱/密码，并在 Supabase 后台创建家庭账号');
+  sbSession=await r.json();
+  localStorage.setItem('g3_sbSession',JSON.stringify(sbSession));
+}
+async function sbFetch(path, opts){
+  await ensureSbAuth();
+  opts=opts||{};
+  const headers=Object.assign({'Authorization':'Bearer '+sbSession.access_token}, opts.headers||{});
+  return sbRaw('/rest/v1/'+path, Object.assign({},opts,{headers}));
 }
 function setSyncStatus(txt, cls){
   const cfg=syncCfg(); cfg.status=txt; cfg.statusClass=cls||'off';
@@ -2252,7 +2278,9 @@ function setSyncStatus(txt, cls){
 }
 function cloudSnapshot(){
   const data={};
-  Object.keys(LS).forEach(k=>{ data[k]=DB[k]; });
+  Object.keys(LS).forEach(k=>{ data[k]=JSON.parse(JSON.stringify(DB[k])); });
+  // 敏感字段不上传云端：家庭账号邮箱/密码只留在各设备本地
+  if(data.settings && data.settings.sync){ data.settings.sync.password=''; data.settings.sync.email=''; }
   return data;
 }
 function applyCloudState(raw){
@@ -2262,7 +2290,7 @@ function applyCloudState(raw){
     Object.keys(LS).forEach(k=>{
       if(data[k]!==undefined){
         if(k==='settings'&&data[k]&&DB.settings){
-          // 保留本机设备标识与同步配置，其余设置（含密码、积分规则等）以云端为准
+          // 保留本机设备标识与同步配置（含账号密码），其余设置以云端为准
           const dev=DB.settings.deviceId, sync=DB.settings.sync;
           data[k].deviceId=dev; data[k].sync=sync;
         }
@@ -2319,8 +2347,9 @@ async function initCloudSync(){
   if(!cfg.url||!cfg.anonKey||!cfg.room){ setSyncStatus('配置不完整：请填写网址、密钥和房间码','bad'); return; }
   try{
     setSyncStatus('正在连接云端…','off');
+    await ensureSbAuth();
     const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
-    if(!res.ok) throw new Error('HTTP '+res.status+'（请确认 Supabase 表已创建）');
+    if(!res.ok) throw new Error('HTTP '+res.status+'（请确认 Supabase 表和规则已配置）');
     const rows=await res.json();
     syncReady=true;
     setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok');
@@ -2337,6 +2366,7 @@ async function syncTestConnection(){
   if(!cfg.url||!cfg.anonKey||!cfg.room){ setSyncStatus('请先填写网址、密钥和房间码','bad'); return; }
   setSyncStatus('正在测试连接…','off');
   try{
+    await ensureSbAuth();
     const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=room&limit=1');
     if(!res.ok) throw new Error('HTTP '+res.status);
     setSyncStatus('✅ 连接成功！点击「保存并连接」启用','ok');
@@ -2349,9 +2379,12 @@ function saveSyncSettings(){
   const room=document.getElementById('syncRoom').value.trim();
   const url=document.getElementById('syncUrl').value.trim();
   const anon=document.getElementById('syncKey').value.trim();
+  const email=document.getElementById('syncEmail').value.trim();
+  const password=document.getElementById('syncPass').value;
   if(!room){ toast('请填写家庭房间码'); return; }
   if(!url||!anon){ toast('请填写 Supabase 网址和 anon 密钥'); return; }
-  cfg.room=room; cfg.url=url; cfg.anonKey=anon;
+  if(!email||!password){ toast('请填写家庭账号邮箱和密码'); return; }
+  cfg.room=room; cfg.url=url; cfg.anonKey=anon; cfg.email=email; cfg.password=password;
   cfg.enabled=document.getElementById('syncEnable').checked;
   persist();
   if(cfg.enabled){ setSyncStatus('正在连接云端…','off'); initCloudSync(); }
