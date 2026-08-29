@@ -22,8 +22,8 @@ echo "→ [0/6] 检查网络…"
 PROXY_HOST=""; PROXY_PORT=""; PROXY_TYPE=""
 if command -v scutil >/dev/null 2>&1; then
   for PT in HTTPS HTTP; do
-    H=$(scutil --proxy | awk "/${PT}Proxy/{print \\$3}" | head -1)
-    P=$(scutil --proxy | awk "/${PT}Port/{print \\$3}" | head -1)
+    H=$(scutil --proxy | awk "/${PT}Proxy/{print \$3}" | head -1)
+    P=$(scutil --proxy | awk "/${PT}Port/{print \$3}" | head -1)
     if [ -n "$H" ] && [ -n "$P" ] && ! echo "$H" | grep -q '{'; then PROXY_HOST="$H"; PROXY_PORT="$P"; PROXY_TYPE="$PT"; break; fi
   done
   if [ -z "$PROXY_HOST" ]; then
