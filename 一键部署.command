@@ -143,6 +143,8 @@ if [ -z "$OWNER" ]; then
   read -n 1 -s -r -p "按任意键退出…"; echo; exit 1
 fi
 echo "✅ 已登录：$OWNER"
+# 让 git 使用 gh 的登录凭据（避免推送时再问用户名/密码）
+gh auth setup-git >/dev/null 2>&1 || true
 
 # ---------- 4) 提交 ----------
 echo ""
@@ -168,7 +170,7 @@ else
   echo "  仓库已存在，推送更新…"
   git remote remove origin 2>/dev/null || true
   git remote add origin "https://github.com/$OWNER/$REPO.git"
-  if ! git push -q -u origin main; then
+  if ! git -c credential.helper="!gh auth git-credential" push -q -u origin main; then
     echo "❌ 推送失败，请把上方错误信息发给我。"
     read -n 1 -s -r -p "按任意键退出…"; echo; exit 1
   fi
