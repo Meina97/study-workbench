@@ -33,12 +33,19 @@ if command -v scutil >/dev/null 2>&1; then
   fi
 fi
 NET_OK=""
-echo "  （尝试直连 github.com，最多重试 3 次…）"
-for try in 1 2 3; do
-  if curl -4 -s -m 15 -o /dev/null https://github.com; then NET_OK=1; break; fi
-  echo "  （第 $try 次失败，2 秒后重试…）"
-  sleep 2
+echo "  （GitHub 从国内网络时通时不通，脚本会耐心重试约 1 分钟…）"
+for try in 1 2 3 4 5 6; do
+  if curl -4 -s -m 15 -o /dev/null https://github.com; then NET_OK=1; echo "  ✅ 第 $try 次连接成功"; break; fi
+  echo "  （第 $try 次失败，5 秒后重试）"
+  sleep 5
 done
+if [ -z "$NET_OK" ]; then
+  echo "  直连 github.com 一直失败，尝试 api.github.com（不同节点可能可用）…"
+  for try in 1 2 3; do
+    if curl -4 -s -m 15 -o /dev/null https://api.github.com; then NET_OK=1; echo "  ✅ 通过 api.github.com 连通"; break; fi
+    sleep 3
+  done
+fi
 if [ -z "$NET_OK" ] && [ -n "$PROXY_HOST" ]; then
   echo "  直连失败，改用系统代理（$PROXY_TYPE $PROXY_HOST:$PROXY_PORT）…"
   if [ "$PROXY_TYPE" = "SOCKS" ]; then
@@ -55,10 +62,13 @@ if [ -z "$NET_OK" ] && [ -n "$PROXY_HOST" ]; then
   done
 fi
 if [ -z "$NET_OK" ]; then
-  echo "❌ 仍连不上 github.com。你反馈浏览器能打开、且没开代理，"
-  echo "   那多半是「首次连接较慢」：请稍等片刻，把本脚本再运行一次（已放宽超时并强制 IPv4）。"
-  echo "   如果反复失败，请把下面这行的输出发给我："
-  echo "     curl -4 -m 15 -I https://github.com"
+  echo "❌ 多次尝试仍连不上 GitHub。为了精确定位，请打开「终端」运行下面 2 条命令，"
+  echo "   把输出发给我："
+  echo '   1) curl -4 -m 15 -I https://github.com'
+  echo '   2) nslookup github.com'
+  echo ""
+  echo "   提示：如果浏览器能打开但终端不行，通常是网络对「非浏览器连接」不稳定/被干扰；"
+  echo "   可以稍等几分钟重试，或换网络（如手机热点）再运行。"
   read -n 1 -s -r -p "按任意键退出…"; echo; exit 1
 fi
 echo "✅ 网络正常"
