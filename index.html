@@ -317,6 +317,30 @@ input[type="month"]{width:100%}
 .sync-status.ok{background:var(--mint-soft);color:#1f8f60}
 .sync-status.bad{background:var(--red-soft);color:#d64545}
 .sync-status.off{background:#f0f2fa;color:#7b83a3}
+
+/* ===== 全屏作业模式计时器 ===== */
+.timer-overlay{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(160deg,#6c9bff,#9d8cff);color:#fff}
+.timer-overlay.hidden{display:none}
+.timer-overlay-inner{width:100%;max-width:780px;padding:30px;text-align:center;display:flex;flex-direction:column;gap:22px;align-items:center}
+.to-top{width:100%;display:flex;justify-content:space-between;align-items:center}
+.to-cat{font-size:15px;font-weight:800;background:rgba(255,255,255,.22);padding:6px 18px;border-radius:20px}
+.to-min{width:46px;height:46px;border-radius:50%;background:rgba(255,255,255,.18);color:#fff;font-size:24px;font-weight:900;line-height:1}
+.to-name{font-size:26px;font-weight:900;max-width:92%;word-break:break-all}
+.to-clock{font-size:92px;font-weight:900;font-variant-numeric:tabular-nums;letter-spacing:3px;line-height:1;text-shadow:0 6px 24px rgba(30,40,90,.25)}
+.to-status{font-size:18px;font-weight:700;opacity:.96}
+.to-btns{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;margin-top:12px}
+.to-btn{min-width:150px;padding:18px 26px;border-radius:22px;font-size:20px;font-weight:900;color:#fff;box-shadow:0 6px 18px rgba(30,40,90,.18)}
+.to-btn:active{transform:scale(.96)}
+.to-pause{background:rgba(255,255,255,.26)}
+.to-stop{background:linear-gradient(135deg,#4fcb8f,#3fae7b)}
+.to-discard{background:rgba(60,70,110,.4)}
+@media (max-width:700px){
+  .to-clock{font-size:58px}
+  .to-name{font-size:21px}
+  .to-btn{min-width:122px;padding:15px 18px;font-size:17px}
+  .to-btns{gap:10px}
+}
 </style>
 </head>
 <body>
@@ -362,6 +386,24 @@ input[type="month"]{width:100%}
 <!-- 弹窗 -->
 <div class="modal-mask hidden" id="modalMask">
   <div class="modal" id="modalBox"></div>
+</div>
+
+<!-- 全屏作业模式计时器 -->
+<div class="timer-overlay hidden" id="timerOverlay">
+  <div class="timer-overlay-inner">
+    <div class="to-top">
+      <span class="to-cat" id="toCat">📖 作业模式</span>
+      <button class="to-min" id="toMinimize" title="收起（计时继续）" onclick="minimizeTimerOverlay()">—</button>
+    </div>
+    <div class="to-name" id="toName"></div>
+    <div class="to-clock" id="toClock">00:00:00</div>
+    <div class="to-status" id="toStatus">📖 作业模式 · 专注计时中</div>
+    <div class="to-btns">
+      <button class="to-btn to-pause" id="toPauseBtn" onclick="pauseTimer()">⏸ 暂停</button>
+      <button class="to-btn to-stop" id="toStopBtn" onclick="completeTimer(false)">⏹ 完成计时</button>
+      <button class="to-btn to-discard" id="toDiscardBtn" onclick="discardTimer()">✖ 放弃</button>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -791,7 +833,7 @@ function startTimer(key, name, category, dateStr){
   persist();
   renderCurrentView();
   startTicker();
-  initCloudSync();
+  openTimerOverlay();
 }
 function finishCurrentAndStart(key,name,category,dateStr){
   completeTimer(true);
@@ -802,12 +844,14 @@ function pauseTimer(){
   const t=getActiveTimer(); if(!t||!t.running) return;
   t.accumulatedMs+=Date.now()-t.lastTick; t.running=false; setActiveTimer(t);
   const c=getCheckin(t.date,t.key); if(c){ c.status='in_progress'; }
-  persist(); renderCurrentView();
+  persist();
+  if(timerOverlayOpen){ updateTimerOverlay(); } else { renderCurrentView(); }
 }
 function resumeTimer(){
   const t=getActiveTimer(); if(!t||t.running) return;
   t.lastTick=Date.now(); t.running=true; setActiveTimer(t);
-  persist(); renderCurrentView(); startTicker();
+  persist(); startTicker();
+  if(timerOverlayOpen){ updateTimerOverlay(); } else { renderCurrentView(); }
 }
 function completeTimer(silent){
   const t=getActiveTimer(); if(!t) return;
@@ -821,6 +865,7 @@ function completeTimer(silent){
   }
   clearActiveTimer();
   persist();
+  closeTimerOverlay();
   if(!silent){ toast('✅ 打卡完成，用时 '+fmtClock(sec*1000)+'，等待家长审核'); renderCurrentView(); }
 }
 function discardTimer(){
@@ -829,6 +874,7 @@ function discardTimer(){
   if(c && c.status==='in_progress'){ c.status='todo'; c.seconds=null; c.actualMinutes=null; }
   clearActiveTimer();
   persist();
+  closeTimerOverlay();
   toast('已放弃本次计时');
   renderCurrentView();
 }
@@ -847,7 +893,43 @@ function startTicker(){
       const k=el.getAttribute('data-clock');
       if(t && t.key===k) el.textContent=fmtClock(elapsedMs(t));
     });
+    // 全屏作业模式时钟
+    if(timerOverlayOpen && t){ updateTimerOverlay(); }
   }, 1000);
+}
+
+/* ================= 全屏作业模式计时器 ================= */
+let timerOverlayOpen=false;
+function openTimerOverlay(){
+  const t=getActiveTimer(); if(!t) return;
+  const el=document.getElementById('timerOverlay'); if(!el) return;
+  timerOverlayOpen=true;
+  document.getElementById('toName').textContent=t.name;
+  document.getElementById('toCat').textContent='📖 作业模式 · '+t.category;
+  updateTimerOverlay();
+  el.classList.remove('hidden');
+  // 桌面浏览器可叠加系统级全屏（iPad Safari 不支持会自动忽略）
+  try{
+    if(document.documentElement && document.documentElement.requestFullscreen && !document.fullscreenElement){
+      document.documentElement.requestFullscreen().catch(()=>{});
+    }
+  }catch(e){}
+}
+function updateTimerOverlay(){
+  const t=getActiveTimer(); if(!t) return;
+  const clk=document.getElementById('toClock'); if(clk) clk.textContent=fmtClock(elapsedMs(t));
+  const st=document.getElementById('toStatus'); if(st) st.textContent=t.running?'📖 作业模式 · 专注计时中':'⏸ 已暂停，点「继续」恢复计时';
+  const pb=document.getElementById('toPauseBtn'); if(pb) pb.textContent=t.running?'⏸ 暂停':'▶️ 继续';
+}
+function closeTimerOverlay(){
+  const el=document.getElementById('timerOverlay'); if(el) el.classList.add('hidden');
+  timerOverlayOpen=false;
+  try{ if(document.fullscreenElement && document.exitFullscreen){ document.exitFullscreen().catch(()=>{}); } }catch(e){}
+}
+function minimizeTimerOverlay(){
+  closeTimerOverlay();
+  renderCurrentView();
+  toast('⏱ 计时继续中，可回任务卡片上操作');
 }
 
 /* ================= 审核 ================= */
@@ -2417,6 +2499,8 @@ function init(){
   document.querySelectorAll('.nav-item').forEach(n=>n.addEventListener('click',()=>setChildView(n.dataset.view)));
   renderCurrentView();
   startTicker();
+  if(getActiveTimer()) openTimerOverlay();
+  initCloudSync();
 }
 document.addEventListener('DOMContentLoaded', init);
 </script>
