@@ -2443,7 +2443,14 @@ function renderChildInfo(){
 }
 function exportAllData(){
   const data={};
-  Object.keys(LS).forEach(k=>{ const v=localStorage.getItem(LS[k]); if(v!=null){ try{ data[k]=JSON.parse(v); }catch(e){} } });
+  // 用「存储键名」(g3_xxx) 导出，保证能被导入功能正确识别
+  Object.keys(LS).forEach(function(k){
+    const v=localStorage.getItem(LS[k]);
+    if(v!=null){ try{ data[LS[k]]=JSON.parse(v); }catch(e){} }
+  });
+  data.__app='学习工作台';
+  data.__ver=APP_VER;
+  data.__exportedAt=new Date().toISOString();
   const blob=new Blob([JSON.stringify(data,null,1)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
@@ -2459,17 +2466,23 @@ function importAllData(input){
   reader.onload=e=>{
     try{
       const data=JSON.parse(e.target.result);
-      const valid=Object.keys(LS).map(k=>LS[k]);
-      const bad=Object.keys(data).filter(k=>!valid.includes(k));
-      if(bad.length){ toast('文件格式不正确，导入失败'); return; }
-      Object.keys(data).forEach(k=>localStorage.setItem(k, JSON.stringify(data[k])));
-      toast('✅ 导入成功，正在刷新…');
-      setTimeout(()=>location.reload(), 800);
-    }catch(err){ toast('导入失败：文件无法解析'); }
+      // 兼容两种格式：新导出=存储键名(g3_xxx)，旧导出=逻辑名(userInfo)
+      const mapped={};
+      Object.keys(LS).forEach(function(k){
+        const lsKey=LS[k];
+        if(data[lsKey]!==undefined) mapped[lsKey]=data[lsKey];
+        else if(data[k]!==undefined) mapped[lsKey]=data[k];
+      });
+      const keys=Object.keys(mapped);
+      if(!keys.length){ toast('文件里没找到工作台数据，请确认选的是「学习工作台备份_日期.json」'); return; }
+      keys.forEach(function(k){ localStorage.setItem(k, JSON.stringify(mapped[k])); });
+      localStorage.setItem('g3_justImported','1');   // 导入后：本机数据推上云端（不被云端覆盖）
+      toast('✅ 导入成功（'+keys.length+' 项），正在刷新…');
+      setTimeout(function(){ location.reload(); }, 900);
+    }catch(err){ toast('导入失败：文件无法解析（请确认是本工作台导出的 json）'); }
   };
   reader.readAsText(f);
 }
-
 function saveChildInfo(){
   DB.userInfo.nickname=document.getElementById('infoName').value.trim()||'小朋友';
   DB.userInfo.grade=document.getElementById('infoGrade').value.trim()||'三年级';
@@ -2742,8 +2755,15 @@ async function initCloudSync(){
     const rows=await res.json();
     syncReady=true;
     setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok');
-    if(rows && rows[0]) applyCloudState(rows[0].data);
-    else cloudPush();
+    if(localStorage.getItem('g3_justImported')==='1'){
+      localStorage.removeItem('g3_justImported');
+      await cloudPush();
+      toast('☁️ 已把「导入的数据」推送到云端');
+    }else if(rows && rows[0]){
+      applyCloudState(rows[0].data);
+    }else{
+      cloudPush();
+    }
     if(syncTimer) clearInterval(syncTimer);
     syncTimer=setInterval(pollCloud, 4000);
   }catch(e){
