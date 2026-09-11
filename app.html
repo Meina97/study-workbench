@@ -2750,11 +2750,25 @@ async function syncTestConnection(){
   // ② 能否访问该项目
   try{
     const r=await fetch(url+'/rest/v1/', {headers:{'apikey':cfg.anonKey}});
-    out.push('② 访问项目：HTTP '+r.status+(r.ok?' ✅':' ❌'));
-    if(!r.ok){ show(out.join('<br>')+'<br>　→ 请检查网址是否填错（应形如 https://xxxx.supabase.co）','bad'); return; }
+    const j=await r.json().catch(function(){ return {}; });
+    if(r.ok){
+      out.push('② 访问项目：✅ 正常（HTTP '+r.status+'）');
+    }else if(r.status===401||r.status===403){
+      out.push('② 访问项目：项目已在线 ✅，但**密钥无效** ❌（HTTP '+r.status+' · '+esc(j.message||j.hint||'')+'）');
+      show(out.join('<br>')+'<br>　→ 请在 Supabase 打开 <b>Project Settings → API → API Keys</b>，复制 <b>Publishable key</b>（sb_publishable_… 开头），把「anon 公开密钥」栏<b>清空后重新粘贴</b>（别带空格，别把网址贴进来）','bad');
+      return;
+    }else if(r.status===404){
+      out.push('② 访问项目：❌ HTTP 404 · '+esc(j.message||j.error||''));
+      show(out.join('<br>')+'<br>　→ 网址可能填错，应形如 https://xxxx.supabase.co','bad');
+      return;
+    }else{
+      out.push('② 访问项目：❌ HTTP '+r.status+' · '+esc(j.message||j.hint||''));
+      show(out.join('<br>'),'bad');
+      return;
+    }
   }catch(e){
     out.push('② 访问项目：❌ 无法连接（'+(e.message||'网络错误')+'）');
-    show(out.join('<br>')+'<br>　→ 手机/电脑能否打开外网？可稍后重试','bad'); return;
+    show(out.join('<br>')+'<br>　→ 该设备当时能否打开外网？也可稍后重试','bad'); return;
   }
   // ③ 家庭账号登录
   if(!cfg.email||!cfg.password){ out.push('③ 家庭账号登录：❌ 未填写邮箱或密码'); show(out.join('<br>'),'bad'); return; }
