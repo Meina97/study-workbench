@@ -2632,7 +2632,10 @@ async function ensureSbAuth(){
   }
   if(!cfg.email||!cfg.password) throw new Error('请填写家庭账号邮箱和密码');
   const r=await sbRaw('/auth/v1/token?grant_type=password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:cfg.email,password:cfg.password})});
-  if(!r.ok) throw new Error('登录失败：请检查邮箱/密码，并在 Supabase 后台创建家庭账号');
+  if(!r.ok){
+    const j=await r.json().catch(function(){ return {}; });
+    throw new Error('登录失败：'+(j.error_description||j.msg||j.message||('HTTP '+r.status)));
+  }
   sbSession=await r.json();
   localStorage.setItem('g3_sbSession',JSON.stringify(sbSession));
 }
@@ -2720,7 +2723,10 @@ async function initCloudSync(){
     setSyncStatus('正在连接云端…','off');
     await ensureSbAuth();
     const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
-    if(!res.ok) throw new Error('HTTP '+res.status+'（请确认 Supabase 表和规则已配置）');
+    if(!res.ok){
+      const j=await res.json().catch(function(){ return {}; });
+      throw new Error('HTTP '+res.status+(j.message||j.hint?('：'+(j.message||j.hint)):''));
+    }
     const rows=await res.json();
     syncReady=true;
     setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok');
@@ -2734,20 +2740,49 @@ async function initCloudSync(){
 }
 async function syncTestConnection(){
   const cfg=syncCfg();
-  if(!cfg.url||!cfg.anonKey||!cfg.room){ setSyncStatus('请先填写网址、密钥和房间码','bad'); return; }
-  setSyncStatus('正在测试连接…','off');
+  const el=document.getElementById('syncStatus');
+  function show(html, cls){ if(el){ el.innerHTML=html; el.className='sync-status '+(cls||'off'); } }
+  const url=(cfg.url||'').replace(/\/+$/,'');
+  if(!url||!cfg.anonKey||!cfg.room){ setSyncStatus('请先填写：Supabase 网址、anon 密钥、家庭房间码','bad'); return; }
+  const out=[];
+  // ① 网址
+  out.push('① Supabase 网址：'+esc(url));
+  // ② 能否访问该项目
   try{
-    await ensureSbAuth();
-    const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=room&limit=1');
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    setSyncStatus('✅ 连接成功！点击「保存并连接」启用','ok');
+    const r=await fetch(url+'/rest/v1/', {headers:{'apikey':cfg.anonKey}});
+    out.push('② 访问项目：HTTP '+r.status+(r.ok?' ✅':' ❌'));
+    if(!r.ok){ show(out.join('<br>')+'<br>　→ 请检查网址是否填错（应形如 https://xxxx.supabase.co）','bad'); return; }
   }catch(e){
-    setSyncStatus('❌ 连接失败：'+(e.message||'未知错误'),'bad');
+    out.push('② 访问项目：❌ 无法连接（'+(e.message||'网络错误')+'）');
+    show(out.join('<br>')+'<br>　→ 手机/电脑能否打开外网？可稍后重试','bad'); return;
   }
-}
-function toggleSyncPass(){
-  const el=document.getElementById('syncPass'); if(!el) return;
-  el.type=(el.type==='password')?'text':'password';
+  // ③ 家庭账号登录
+  if(!cfg.email||!cfg.password){ out.push('③ 家庭账号登录：❌ 未填写邮箱或密码'); show(out.join('<br>'),'bad'); return; }
+  try{
+    const r=await sbRaw('/auth/v1/token?grant_type=password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:cfg.email,password:cfg.password})});
+    const j=await r.json().catch(function(){ return {}; });
+    if(r.ok){
+      sbSession=j; localStorage.setItem('g3_sbSession', JSON.stringify(j));
+      out.push('③ 家庭账号登录：✅ 成功');
+    }else{
+      out.push('③ 家庭账号登录：❌ '+(j.error_description||j.msg||j.message||('HTTP '+r.status)));
+      show(out.join('<br>')+'<br>　→ 邮箱或密码不对；或该用户还没在 Supabase 后台创建（Authentication → Users → Add user）','bad'); return;
+    }
+  }catch(e){ out.push('③ 家庭账号登录：❌ '+(e.message||'网络错误')); show(out.join('<br>'),'bad'); return; }
+  // ④ 数据表可读性
+  try{
+    const r=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=room&limit=1');
+    const j=await r.json().catch(function(){ return null; });
+    if(r.ok){
+      out.push('④ 数据表 workbench：✅ 可读取（'+(Array.isArray(j)&&j.length?'该房间已有云端数据':'房间尚无数据，首次连接会自动创建')+'）');
+    }else{
+      out.push('④ 数据表 workbench：❌ HTTP '+r.status+(j&&(j.message||j.hint)?(' · '+esc(j.message||j.hint)):''));
+      show(out.join('<br>')+'<br>　→ 404：表没建，请到 Supabase 的 SQL Editor 执行建表语句；401/403：检查 anon 密钥和表规则','bad'); return;
+    }
+  }catch(e){ out.push('④ 数据表 workbench：❌ '+(e.message||'网络错误')); show(out.join('<br>'),'bad'); return; }
+  out.push('<b>✅ 四项全部通过，点「保存并连接」即可</b>');
+  show(out.join('<br>'),'ok');
+  toast('✅ 连接测试全部通过');
 }
 function saveSyncSettings(){
   const cfg=syncCfg();
