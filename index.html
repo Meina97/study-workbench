@@ -1183,20 +1183,38 @@ function monthTasksStats(ms){
   const {y,m}=parseMonth(ms);
   const total=daysInMonth(y,m);
   const cats={'语文':{total:0,done:0},'数学':{total:0,done:0},'英语':{total:0,done:0},'兴趣':{total:0,done:0}};
-  let allTotal=0, allDone=0, totalSec=0;
+  let allTotal=0, allDone=0, totalSec=0, orphanCount=0;
   const secByCat={'语文':0,'数学':0,'英语':0,'兴趣':0};
+  const counted={};
   for(let day=1; day<=total; day++){
     const d=y+'-'+String(m).padStart(2,'0')+'-'+String(day).padStart(2,'0');
     buildDayTasks(d).forEach(it=>{
       const cat=it.category;
-      if(cats[cat]){
-        cats[cat].total++; allTotal++;
-        const c=it.checkin;
-        if(c&&c.status==='approved'){ cats[cat].done++; allDone++; totalSec+=(c.seconds||c.actualMinutes*60||0); secByCat[cat]+=(c.seconds||c.actualMinutes*60||0); }
+      if(!cats[cat]) return;
+      cats[cat].total++; allTotal++;
+      const c=it.checkin;
+      if(c&&c.status==='approved'){
+        counted[c.id]=true;
+        cats[cat].done++; allDone++;
+        const sec=(c.seconds||(c.actualMinutes||0)*60||0);
+        totalSec+=sec; secByCat[cat]+=sec;
       }
     });
   }
-  return {cats, allTotal, allDone, totalSec, secByCat};
+  // 补计「已完成、但已不在当前排期里」的打卡记录
+  // （例如：编辑课程/删除教辅后旧的排期条目被替换，历史完成记录不能因此丢失）
+  DB.checkins.forEach(function(c){
+    if(c.status!=='approved') return;
+    if(!c.date||c.date.slice(0,7)!==ms) return;
+    if(counted[c.id]) return;
+    const cat=c.category;
+    if(!cats[cat]) return;
+    counted[c.id]=true;
+    cats[cat].total++; cats[cat].done++; allTotal++; allDone++; orphanCount++;
+    const sec=(c.seconds||(c.actualMinutes||0)*60||0);
+    totalSec+=sec; secByCat[cat]+=sec;
+  });
+  return {cats, allTotal, allDone, totalSec, secByCat, orphanCount};
 }
 function renderMiniCalendar(ms){
   const {y,m}=parseMonth(ms);
@@ -2241,7 +2259,9 @@ function renderStats(){
   const subj=monthSubjectDurations();
   const acc=accuracyPoints();
   const pv=plannedVsActual();
+  const mstat=monthTasksStats(monthStr(new Date()));
   const html='<div class="parent-tab-head"><h2>📊 统计报表</h2><button class="btn btn-primary" onclick="exportStatsText()">📤 导出统计文本</button></div>'
+    +(mstat.orphanCount?'<div class="panel" style="background:var(--blue-soft);border:none"><p style="font-size:13px;color:var(--blue-deep);margin:0">ℹ️ 已计入 <b>'+mstat.orphanCount+'</b> 条历史打卡（这些任务已不在当前排期里，例如编辑课程前的完成记录），所以完成数和学习用时不会因为改排课而丢失。</p></div>':'')
     +'<div class="grid-2">'
     +'<div class="chart-box"><h4>📆 本周打卡完成率（'+week[0].date+' ~ '+week[6].date+'）</h4><canvas id="chartWeek" height="210"></canvas></div>'
     +'<div class="chart-box"><h4>⏱ 各科月度学习时长（分钟）</h4><canvas id="chartSubj" height="210"></canvas></div>'
