@@ -1492,11 +1492,23 @@ function openParentGate(){
     +'<p style="color:var(--sub);font-size:13.5px;margin-bottom:10px">请输入 4 位数字密码，进入家长后台</p>'
     +'<div class="pin-box" id="pinBox">'+[0,1,2,3].map(i=>'<div class="pin-dot" id="pinDot'+i+'"></div>').join('')+'</div>'
     +'<input type="password" id="pinInput" maxlength="4" inputmode="numeric" style="width:100%;text-align:center;font-size:24px;letter-spacing:14px;padding:12px" placeholder="••••">'
-    +'<p style="font-size:12px;color:var(--sub);margin-top:10px">💡 初始密码：1234（可在家长后台「孩子信息」中修改）</p>'
+    +'<p style="font-size:12px;color:var(--sub);margin-top:10px">💡 初始密码：1234（可在家长后台「孩子信息」中修改）<br>'
+    +'<a href="javascript:void(0)" onclick="forgotPin()" style="color:var(--blue-deep);font-weight:700">忘记密码？点这里重置为 1234</a></p>'
     +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="checkPin()">进入后台</button></div>');
   const inp=document.getElementById('pinInput');
   inp.oninput=()=>{ updatePinDots(inp.value); if(inp.value.length===4) checkPin(); };
   setTimeout(()=>inp.focus(),50);
+}
+function forgotPin(){
+  openModal('<h3>🔑 重置家长密码</h3>'
+    +'<p style="font-size:14px;color:#555c7e;line-height:1.7">家长密码只是"界面锁"（防止孩子误入后台），不是加密。<br>确定要把家长密码重置为 <b>1234</b> 吗？</p>'
+    +'<p style="font-size:12.5px;color:var(--sub)">✅ 重置不会删除任何数据：教辅、课程、任务、打卡记录、积分都会保留。</p>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
+    +'<button class="btn btn-primary" onclick="doResetPin()">确认重置为 1234</button></div>');
+}
+function doResetPin(){
+  DB.settings.pin='1234'; persist();
+  closeModal(); toast('🔑 家长密码已重置为 1234，请再点一次齿轮进入');
 }
 function updatePinDots(v){
   for(let i=0;i<4;i++){
