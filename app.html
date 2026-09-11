@@ -2402,12 +2402,15 @@ function renderChildInfo(){
     +'</div>'
     +'<button class="btn btn-primary" onclick="changePin()">修改密码</button></div>'
     +'<div class="panel"><h4>☁️ 云端实时同步（推荐）</h4>'
-    +'<p style="font-size:13.5px;color:#555c7e;line-height:1.7">在 <b>MacBook</b> 和孩子 <b>iPad / 苹果台式机</b> 上分别填写<b>同一个</b>「家庭房间码」和 Supabase 信息（网址+密钥+家庭账号）并启用，两端即可自动实时同步（家长编辑 → 孩子几秒内看到），无需导出/导入。首次设置约 10 分钟，见「📖 设置说明」。</p>'
+    +'<p style="font-size:13.5px;color:#555c7e;line-height:1.7">在 <b>MacBook</b> 和孩子 <b>iPad / 苹果台式机</b> 上分别填写<b>同一个</b>「家庭房间码」和 Supabase 信息（网址+密钥+家庭账号）并启用，两端即可自动实时同步（家长编辑 → 孩子几秒内看到），无需导出/导入。</p>'
+    +'<p style="font-size:12.5px;color:#d64545;line-height:1.7;margin-top:6px">⚠️ 注意：清除浏览器/Safari 网站数据会连同步配置一起清掉，需要重新填写一次；换设备或重装后同样要重填。</p>'
     +'<div class="form-row"><label>家庭房间码（两端填同一个，如 xiaoya2026）</label><input id="syncRoom" value="'+esc(syncCfg().room)+'" placeholder="例如 xiaoya2026"></div>'
         +'<div class="form-row"><label>Supabase 项目网址（Project URL）</label><input id="syncUrl" value="'+esc(syncCfg().url||'')+'" placeholder="https://xxxx.supabase.co"></div>'
     +'<div class="form-row"><label>anon 公开密钥（anon public key）</label><input id="syncKey" value="'+esc(syncCfg().anonKey||'')+'" placeholder="eyJhbGciOi..."></div>'
     +'<div class="form-row"><label>家庭账号邮箱（两端填同一个）</label><input id="syncEmail" value="'+esc(syncCfg().email||'')+'" placeholder="family@example.com" autocomplete="off"></div>'
-    +'<div class="form-row"><label>家庭账号密码（两端填同一个，不会上传云端）</label><input id="syncPass" type="password" value="" placeholder="••••••••" autocomplete="new-password"></div>'
+    +'<div class="form-row"><label>家庭账号密码（两端填同一个，不会上传云端）'>
+    +'<button class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="toggleSyncPass()">👁 显示 / 隐藏</button></label>'
+    +'<input id="syncPass" type="password" value="'+esc(syncCfg().password||'')+'" placeholder="••••••••" autocomplete="new-password"></div>'
     +'<label class="check-item" style="width:fit-content"><input type="checkbox" id="syncEnable"'+(syncCfg().enabled?' checked':'')+' style="width:16px;height:16px"> 启用云端同步</label>'
     +'<div class="sync-status '+(syncCfg().statusClass||'off')+'" id="syncStatus">'+(syncCfg().status||'未启用')+'</div>'
     +'<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">'
@@ -2741,6 +2744,10 @@ async function syncTestConnection(){
   }catch(e){
     setSyncStatus('❌ 连接失败：'+(e.message||'未知错误'),'bad');
   }
+}
+function toggleSyncPass(){
+  const el=document.getElementById('syncPass'); if(!el) return;
+  el.type=(el.type==='password')?'text':'password';
 }
 function saveSyncSettings(){
   const cfg=syncCfg();
