@@ -509,7 +509,10 @@ function defaultRoutine(){
 
 function defaultPoints(){
   return {
-    config:{perTask:10, streakDays:7, streakBonus:20},
+    config:{perTask:10, streakDays:7, streakBonus:20,
+            overdueOn:true, overdueBase:2, overdueDouble:true, overdueCap:20, minPoints:0},
+    settled:{},
+    settleFrom:'',
     log:[],
     rewards:[
       {id:'r1',icon:'📺',name:'动画片30分钟',cost:50,enabled:true},
@@ -599,6 +602,11 @@ function loadAll(){
     if(!Array.isArray(c.weekDays)) c.weekDays=[];
     if(!Array.isArray(c.dates)) c.dates=[];
   });
+  // 积分配置补齐（老数据没有逾期扣分字段）
+  DB.points.config=Object.assign({perTask:10, streakDays:7, streakBonus:20,
+    overdueOn:true, overdueBase:2, overdueDouble:true, overdueCap:20, minPoints:0}, DB.points.config||{});
+  if(!DB.points.settled) DB.points.settled={};
+  if(typeof DB.points.settleFrom!=='string') DB.points.settleFrom='';
 }
 function persist(){
   localStorage.setItem(LS.userInfo, JSON.stringify(DB.userInfo));
@@ -1030,6 +1038,58 @@ function minimizeTimerOverlay(){
   closeTimerOverlay();
   renderCurrentView();
   toast('⏱ 计时继续中，可回任务卡片上操作');
+}
+
+/* ================= 逾期未完成扣分 ================= */
+function daysBetween(a,b){ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000); }
+function applyDeduction(amount, reason){
+  if(!(amount>0)) return 0;
+  const cfg=DB.points.config;
+  const cur=totalPoints();
+  let delta=-amount;
+  const floor=parseFloat(cfg.minPoints);
+  if(!isNaN(floor) && cur+delta<floor) delta=floor-cur;   // 最多扣到下限
+  if(delta!==0){ addPoints(delta, reason); return delta; }
+  return 0;
+}
+function settleOverduePoints(){
+  const cfg=DB.points.config;
+  if(!cfg.overdueOn) return 0;
+  const p=DB.points;
+  if(!p.settled) p.settled={};
+  const today=todayStr();
+  if(!p.settleFrom) p.settleFrom=today;      // 从启用日算起，不追溯历史
+  if(p.settleFrom>=today) return 0;
+  let start=p.settleFrom;
+  if(daysBetween(start,today)>30){ const d=new Date(today+'T00:00:00'); d.setDate(d.getDate()-30); start=fmtDate(d); }
+  let deducted=0, changed=false;
+  const cur=new Date(start+'T00:00:00');
+  while(fmtDate(cur)<today){
+    const ds=fmtDate(cur); cur.setDate(cur.getDate()+1);
+    if(p.settled[ds]) continue;
+    p.settled[ds]=true; changed=true;
+    if(DB.holidays.indexOf(ds)>=0) continue;          // 放假当天豁免
+    const overdueDays=Math.max(1, daysBetween(ds,today));
+    let missing=0;
+    buildDayTasks(ds).forEach(function(it){
+      const c=it.checkin;
+      const done=!!(c&&(c.status==='approved'||c.status==='pending_review'));   // 待审核也算已完成
+      if(!done) missing++;
+    });
+    DB.homework.forEach(function(h){ if(hwDue(h)===ds && !h.completed) missing++; });   // 到期未完成的作业
+    if(!missing) continue;
+    let per=parseFloat(cfg.overdueBase)||0;
+    if(cfg.overdueDouble) per=per*Math.pow(2, Math.max(0, overdueDays-1));
+    const cap=parseFloat(cfg.overdueCap);
+    if(!isNaN(cap)&&cap>0) per=Math.min(per,cap);
+    const amount=Math.round(per*missing);
+    if(amount>0){
+      const got=applyDeduction(amount, '逾期未完成 '+missing+' 项（'+cnMonthDay(ds)+'，逾期'+overdueDays+'天）');
+      deducted+=Math.abs(got);
+    }
+  }
+  if(changed) persist();
+  return deducted;
 }
 
 /* ================= 审核 ================= */
@@ -2163,17 +2223,35 @@ function renderRewards(){
     +'<div class="form-row"><label>单任务积分（默认10分）</label><input id="cfgPer" type="number" min="1" value="'+cfg.perTask+'"></div>'
     +'<div class="form-row"><label>连续打卡天数（默认7天）</label><input id="cfgDays" type="number" min="1" value="'+cfg.streakDays+'"></div>'
     +'<div class="form-row"><label>连续打卡奖励积分</label><input id="cfgBonus" type="number" min="0" value="'+cfg.streakBonus+'"></div>'
-    +'<div class="form-row" style="display:flex;align-items:flex-end"><button class="btn btn-primary" onclick="savePointsConfig()">保存规则</button></div>'
-    +'</div></div>'
+    +'<div class="form-row"><label>积分最低不低于（0=不会扣成负数）</label><input id="cfgMinPts" type="number" value="'+(cfg.minPoints==null?0:cfg.minPoints)+'"></div>'
+    +'</div>'
+    +'<h4 style="margin-top:16px">⏰ 逾期未完成扣分</h4>'
+    +'<label class="check-item" style="width:fit-content"><input type="checkbox" id="cfgOverdue"'+(cfg.overdueOn?' checked':'')+' style="width:16px;height:16px"> 启用「逾期未完成扣分」</label>'
+    +'<div class="form-grid" style="margin-top:10px">'
+    +'<div class="form-row"><label>逾期第1天，每项未完成任务扣分</label><input id="cfgOverdueBase" type="number" min="0" value="'+cfg.overdueBase+'"></div>'
+    +'<div class="form-row"><label>单项单日扣分上限</label><input id="cfgOverdueCap" type="number" min="0" value="'+cfg.overdueCap+'"></div>'
+    +'</div>'
+    +'<label class="check-item" style="width:fit-content;margin-top:6px"><input type="checkbox" id="cfgDouble"'+(cfg.overdueDouble?' checked':'')+' style="width:16px;height:16px"> 每多逾期一天，扣分翻倍（2→4→8→16…）</label>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7;margin-top:8px">结算规则：每天第一次打开工作台时，自动结算<b>昨天及更早</b>未完成的任务（已完成/待审核的不扣；🏖标记放假的当天不扣）；每个日期只结算一次。</p>'
+    +'<div style="margin-top:10px"><button class="btn btn-primary" onclick="savePointsConfig()">保存规则</button></div></div>'
     +'<div class="panel"><h4>🎁 奖励项目</h4><table class="tbl"><thead><tr><th>图标</th><th>名称</th><th>所需积分</th><th>状态</th><th>操作</th></tr></thead><tbody>'+rw+'</tbody></table></div>'
     +'<div class="panel"><h4>📜 兑换记录</h4><table class="tbl"><thead><tr><th>日期</th><th>奖励</th><th>消耗积分</th><th>操作</th></tr></thead><tbody>'+red+'</tbody></table></div>';
   document.getElementById('parentContent').innerHTML=html;
 }
 function savePointsConfig(){
-  DB.points.config.perTask=parseInt(document.getElementById('cfgPer').value)||10;
-  DB.points.config.streakDays=parseInt(document.getElementById('cfgDays').value)||7;
-  DB.points.config.streakBonus=parseInt(document.getElementById('cfgBonus').value)||0;
-  persist(); toast('✅ 积分规则已保存');
+  const c=DB.points.config;
+  c.perTask=parseInt(document.getElementById('cfgPer').value)||10;
+  c.streakDays=parseInt(document.getElementById('cfgDays').value)||7;
+  c.streakBonus=parseInt(document.getElementById('cfgBonus').value)||0;
+  const mp=document.getElementById('cfgMinPts'); if(mp) c.minPoints=parseFloat(mp.value)||0;
+  const ov=document.getElementById('cfgOverdue'); if(ov) c.overdueOn=ov.checked;
+  const ob=document.getElementById('cfgOverdueBase'); if(ob) c.overdueBase=parseFloat(ob.value)||0;
+  const oc=document.getElementById('cfgOverdueCap'); if(oc) c.overdueCap=parseFloat(oc.value)||0;
+  const od=document.getElementById('cfgDouble'); if(od) c.overdueDouble=od.checked;
+  if(!DB.points.settleFrom) DB.points.settleFrom=todayStr();   // 从今天开始结算，不追溯历史
+  persist();
+  toast(c.overdueOn?'✅ 已保存：逾期扣分已启用':'✅ 已保存：逾期扣分已关闭');
+  renderParentCurrentTab();
 }
 function toggleReward(id){ const r=DB.points.rewards.find(x=>x.id===id); if(r){ r.enabled=!r.enabled; persist(); renderParentCurrentTab(); } }
 function deleteReward(id){ DB.points.rewards=DB.points.rewards.filter(x=>x.id!==id); persist(); renderParentCurrentTab(); }
@@ -2885,6 +2963,7 @@ async function checkAppUpdate(){
 /* ================= 初始化 ================= */
 function init(){
   loadAll();
+  const overdueDeducted=settleOverduePoints();   // 每天第一次打开时结算逾期扣分
   // 首次运行或排期缺失时自动生成
   const needGen=DB.schedule.length===0
     || DB.studyAids.some(a=>a.enabled&&a.planMonth&&!DB.schedule.some(s=>s.month===a.planMonth))
@@ -2908,6 +2987,7 @@ function init(){
   startTicker();
   if(getActiveTimer()) openTimerOverlay();
   initCloudSync();
+  if(overdueDeducted>0){ setTimeout(function(){ toast('⚠️ 已结算逾期扣分：-'+overdueDeducted+' 分（见积分明细）'); }, 1500); }
   checkAppUpdate();
   setInterval(checkAppUpdate, 10*60*1000);
   document.addEventListener('visibilitychange', function(){ if(!document.hidden) checkAppUpdate(); });
