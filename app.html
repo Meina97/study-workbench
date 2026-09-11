@@ -415,7 +415,7 @@ input[type="month"]{width:100%}
     <div class="to-clock" id="toClock">00:00:00</div>
     <div class="to-status" id="toStatus">📖 作业模式 · 专注计时中</div>
     <div class="to-btns">
-      <button class="to-btn to-pause" id="toPauseBtn" onclick="pauseTimer()">⏸ 暂停</button>
+      <button class="to-btn to-pause" id="toPauseBtn" onclick="toggleTimerPause()">⏸ 暂停</button>
       <button class="to-btn to-stop" id="toStopBtn" onclick="completeTimer(false)">⏹ 完成计时</button>
       <button class="to-btn to-discard" id="toDiscardBtn" onclick="discardTimer()">✖ 放弃</button>
     </div>
@@ -904,6 +904,10 @@ function finishCurrentAndStart(key,name,category,dateStr){
   closeModal();
   startTimer(key,name,category,dateStr);
 }
+function toggleTimerPause(){
+  const t=getActiveTimer(); if(!t) return;
+  if(t.running){ pauseTimer(); } else { resumeTimer(); }
+}
 function pauseTimer(){
   const t=getActiveTimer(); if(!t||!t.running) return;
   t.accumulatedMs+=Date.now()-t.lastTick; t.running=false; setActiveTimer(t);
@@ -1011,7 +1015,11 @@ function updateTimerOverlay(){
   const t=getActiveTimer(); if(!t) return;
   const clk=document.getElementById('toClock'); if(clk) clk.textContent=fmtClock(elapsedMs(t));
   const st=document.getElementById('toStatus'); if(st) st.textContent=t.running?'📖 作业模式 · 专注计时中':'⏸ 已暂停，点「继续」恢复计时';
-  const pb=document.getElementById('toPauseBtn'); if(pb) pb.textContent=t.running?'⏸ 暂停':'▶️ 继续';
+  const pb=document.getElementById('toPauseBtn');
+  if(pb){
+    pb.textContent=t.running?'⏸ 暂停':'▶️ 继续';
+    pb.setAttribute('onclick','toggleTimerPause()');   // 双保险：无论何时点击都按当前状态切换
+  }
 }
 function closeTimerOverlay(){
   const el=document.getElementById('timerOverlay'); if(el) el.classList.add('hidden');
