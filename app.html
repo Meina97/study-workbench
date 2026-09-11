@@ -2408,7 +2408,7 @@ function renderChildInfo(){
         +'<div class="form-row"><label>Supabase 项目网址（Project URL）</label><input id="syncUrl" value="'+esc(syncCfg().url||'')+'" placeholder="https://xxxx.supabase.co"></div>'
     +'<div class="form-row"><label>anon 公开密钥（anon public key）</label><input id="syncKey" value="'+esc(syncCfg().anonKey||'')+'" placeholder="eyJhbGciOi..."></div>'
     +'<div class="form-row"><label>家庭账号邮箱（两端填同一个）</label><input id="syncEmail" value="'+esc(syncCfg().email||'')+'" placeholder="family@example.com" autocomplete="off"></div>'
-    +'<div class="form-row"><label>家庭账号密码（两端填同一个，不会上传云端）'>
+    +'<div class="form-row"><label>家庭账号密码（两端填同一个，不会上传云端） '
     +'<button class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="toggleSyncPass()">👁 显示 / 隐藏</button></label>'
     +'<input id="syncPass" type="password" value="'+esc(syncCfg().password||'')+'" placeholder="••••••••" autocomplete="new-password"></div>'
     +'<label class="check-item" style="width:fit-content"><input type="checkbox" id="syncEnable"'+(syncCfg().enabled?' checked':'')+' style="width:16px;height:16px"> 启用云端同步</label>'
