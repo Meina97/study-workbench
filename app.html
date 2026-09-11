@@ -920,7 +920,8 @@ function resumeTimer(){
 function completeTimer(silent){
   const t=getActiveTimer(); if(!t) return;
   const sec=Math.round(elapsedMs(t)/1000);
-  const c=getCheckin(t.date,t.key);
+  let c=getCheckin(t.date,t.key);
+  if(!c) c=ensureCheckin(t.date,t.key,t.category,t.name);   // 极端情况：记录丢失时补建，确保用时不被丢弃
   if(c){
     c.status='pending_review';
     c.seconds=sec;
@@ -2241,8 +2242,14 @@ function weekCompletion(){
     const d=new Date(mon); d.setDate(mon.getDate()+i);
     const ds=fmtDate(d);
     const items=buildDayTasks(ds);
-    const done=items.filter(it=>it.checkin&&it.checkin.status==='approved').length;
-    out.push({label:WEEK_CN[i], total:items.length, done, date:ds});
+    let total=items.length;
+    let done=items.filter(it=>it.checkin&&it.checkin.status==='approved').length;
+    // 学校作业也计入当日任务（与孩子端「今日打卡」展示一致）
+    DB.homework.filter(function(h){ return hwVisible(h,ds); }).forEach(function(h){
+      total++;
+      if(h.completed) done++;
+    });
+    out.push({label:WEEK_CN[i], total, done, date:ds});
   }
   return out;
 }
