@@ -908,6 +908,25 @@ function startTicker(){
   }, 1000);
 }
 
+function retryCheckin(key, dateStr){
+  const c=getCheckin(dateStr,key);
+  if(c){ c.status='todo'; c.seconds=null; c.actualMinutes=null; c.accuracy=null; c.reviewedAt=null; c.pointsAwarded=false; }
+  if(key.indexOf('hw:')===0){
+    const h=DB.homework.find(x=>x.id===key.slice(3));
+    if(h){ h.completed=false; h.actualMinutes=null; h.seconds=null; }
+  }
+  persist(); renderCurrentView(); toast('🔄 已重置，可以重新开始计时');
+}
+function unapproveCheckin(id){
+  const c=DB.checkins.find(x=>x.id===id); if(!c||c.status!=='approved') return;
+  if(c.pointsAwarded){
+    DB.points.log.push({id:uid(), date:todayStr(), delta:-DB.points.config.perTask, reason:'撤销审核扣回积分：'+c.name});
+    c.pointsAwarded=false;
+  }
+  c.status='pending_review'; c.reviewedAt=null;
+  persist(); toast('↩️ 已撤销通过，回到待审核'); renderParentCurrentTab();
+}
+
 /* ================= 全屏作业模式计时器 ================= */
 let timerOverlayOpen=false;
 function openTimerOverlay(){
@@ -1028,6 +1047,8 @@ function taskCardHTML(item, dateStr){
                :'<button class="btn btn-primary btn-sm" onclick="resumeTimer()">▶️ 继续</button>')
       +'<button class="btn btn-stop btn-sm" onclick="completeTimer(false)">⏹ 完成计时</button>'
       +'<button class="btn btn-danger btn-sm" onclick="discardTimer()">✖ 放弃</button>';
+  } else if(c.status==='rejected'){
+    actions=statusBadge(c)+'<button class="btn btn-primary btn-sm" onclick="retryCheckin(\''+key+'\',\''+dateStr+'\')">🔄 重新开始</button>';
   } else {
     actions=statusBadge(c);
   }
@@ -1087,7 +1108,6 @@ function renderToday(){
           +'<div class="task-meta">📓 学校作业</div></div>'
           +'<div class="task-actions">'
           +'<button class="btn btn-play btn-sm" onclick="startTimer(\''+hk+'\',\''+esc(hName).replace(/'/g,"\\'")+'\',\''+cat+'\',\''+ds+'\')">▶️ 计时完成</button>'
-          +'<button class="btn btn-ghost btn-sm" onclick="toggleHomework(\''+h.id+'\')">✅ 直接完成</button>'
           +'</div></div>';
       }
     });
@@ -1303,7 +1323,7 @@ function addHomework(){
   const subject=document.getElementById('hwSubject').value;
   const date=document.getElementById('hwDate').value||todayStr();
   if(!content){ toast('请填写作业内容'); return; }
-  DB.homework.push({id:uid(), date, subject, content, photo:hwPhoto, completed:false, createdAt:Date.now()});
+  DB.homework.push({id:uid(), date, subject, content, photo:hwPhoto, completed:false, by:'孩子', createdAt:Date.now()});
   persist(); hwPhoto=null;
   document.getElementById('hwContent').value='';
   const pv=document.getElementById('hwPhotoPreview'); if(pv) pv.innerHTML='';
@@ -1324,20 +1344,24 @@ function renderHomework(){
   let list='';
   Object.keys(groups).sort().reverse().forEach(ds=>{
     const items=groups[ds].map(h=>{
+      const hc=getCheckin(h.date,'hw:'+h.id);
+      const stat=hc?statusBadge(hc):(h.completed?'<span class="badge bg-mint">✅ 已完成</span>':'<span class="badge bg-gray">待计时打卡</span>');
       return '<div class="hw-item"><div class="task-info" style="flex:1">'
-        +'<span class="badge bg-blue">'+esc(h.subject)+'</span>'
+        +'<span class="badge bg-blue">'+esc(h.subject)+'</span> <span class="badge bg-gray">'+(h.by||'孩子')+'录入</span>'
         +'<div style="font-size:15px;font-weight:700;margin-top:3px'+(h.completed?';text-decoration:line-through;color:var(--sub)':'')+'">'+esc(h.content)+'</div>'
+        +(h.actualMinutes?'<div style="font-size:12px;color:var(--blue-deep);margin-top:2px">⏱ 用时 '+h.actualMinutes+' 分钟</div>':'')
         +(h.photo?'<div class="hw-photo" style="margin-top:8px"><img src="'+h.photo+'" alt="作业照片"></div>':'')
+        +'<div style="font-size:12px;color:var(--sub);margin-top:4px">请在「今日打卡」中计时完成</div>'
         +'</div>'
-        +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
-        +'<button class="btn '+(h.completed?'btn-mint':'btn-ghost')+' btn-sm" onclick="toggleHomework(\''+h.id+'\')">'+(h.completed?'✅ 已完成':'标记完成')+'</button> '
+        +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start">'
+        +stat
         +'<button class="btn btn-danger btn-sm" onclick="deleteHomework(\''+h.id+'\')">删除</button></div></div>';
     }).join('');
     const done=groups[ds].filter(h=>h.completed).length;
     list+='<div class="section-title" style="margin-top:18px">📅 '+cnMonthDay(ds)+' <span class="chip">'+done+'/'+groups[ds].length+'</span></div>'+items;
   });
   if(!list) list='<div class="empty"><div class="big">📓</div>还没有作业记录，来记下今天的作业吧！</div>';
-  const html='<div class="greet"><h1>📓 作业本</h1><div class="date">每天逐条录入作业，会自动出现在「今日打卡」对应学科里 ✅</div></div>'
+  const html='<div class="greet"><h1>📓 作业本</h1><div class="date">逐条录入作业后会出现在「今日打卡」对应学科，需<b>计时完成</b>（家长也可在后台录入）✅</div></div>'
     +'<div class="card"><h4 style="margin-bottom:12px;font-size:16px;font-weight:800">✏️ 录入一条作业</h4>'
     +'<div class="form-grid">'
     +'<div class="form-row"><label>学科</label><select id="hwSubject">'+['语文','数学','英语','其他'].map(s=>'<option>'+s+'</option>').join('')+'</select></div>'
@@ -1375,7 +1399,7 @@ const PARENT_TABS=[
   {id:'rewards',icon:'⭐',name:'积分奖励'},
   {id:'routine',icon:'⏰',name:'作息管理'},
   {id:'stats',icon:'📊',name:'统计报表'},
-  {id:'hwParent',icon:'📝',name:'作业记录'},
+  {id:'hwParent',icon:'📝',name:'作业管理'},
   {id:'info',icon:'👧',name:'孩子信息'}
 ];
 function openParentGate(){
@@ -1913,12 +1937,13 @@ function renderReview(){
   const histRows=history.map(c=>'<tr><td>'+cnMonthDay(c.date)+'</td><td>'+catDot(c.category)+' '+esc(c.name)+'</td>'
     +'<td>'+(c.actualMinutes!=null?c.actualMinutes+' 分钟':'—')+'</td>'
     +'<td>'+ (c.accuracy!=null?c.accuracy+'%':'—') +'</td>'
-    +'<td>'+(c.status==='approved'?'<span class="badge bg-mint">✅ 已通过'+(c.pointsAwarded?' +'+DB.points.config.perTask+'分':'')+'</span>':'<span class="badge bg-red">⚠️ 已驳回</span>')+'</td></tr>').join('')||'<tr><td colspan="5" class="empty">暂无历史记录</td></tr>';
+    +'<td>'+(c.status==='approved'?'<span class="badge bg-mint">✅ 已通过'+(c.pointsAwarded?' +'+DB.points.config.perTask+'分':'')+'</span>':'<span class="badge bg-red">⚠️ 已驳回</span>')+'</td>'
+    +'<td style="white-space:nowrap">'+(c.status==='approved'?'<button class="btn btn-ghost btn-sm" onclick="unapproveCheckin(\''+c.id+'\')">↩️ 撤销通过</button>':'<span style="font-size:12px;color:var(--sub)">孩子可重新打卡</span>')+'</td></tr>').join('')||'<tr><td colspan="6" class="empty">暂无历史记录</td></tr>';
   const html='<div class="parent-tab-head"><h2>🕐 打卡审核</h2><span class="badge bg-orange">待审核 '+pending.length+' 项</span></div>'
     +'<div class="panel"><h4>📨 待审核（计时器自动记录用时）</h4>'
     +'<table class="tbl"><thead><tr><th>日期</th><th>任务</th><th>实际用时</th><th>正确率（数学）</th><th>操作</th></tr></thead><tbody>'+pendRows+'</tbody></table></div>'
     +'<div class="panel"><h4>📜 审核历史</h4>'
-    +'<table class="tbl"><thead><tr><th>日期</th><th>任务</th><th>用时</th><th>正确率</th><th>状态</th></tr></thead><tbody>'+histRows+'</tbody></table></div>';
+    +'<table class="tbl"><thead><tr><th>日期</th><th>任务</th><th>用时</th><th>正确率</th><th>状态</th><th>操作</th></tr></thead><tbody>'+histRows+'</tbody></table></div>';
   document.getElementById('parentContent').innerHTML=html;
 }
 
@@ -2126,13 +2151,36 @@ function exportStatsText(){
 
 /* ================= 作业记录（家长查看） ================= */
 function renderHwParent(){
-  const list=DB.homework.slice().sort((a,b)=>b.createdAt-a.createdAt).map(h=>'<tr>'
-    +'<td>'+cnMonthDay(h.date)+'<div style="font-size:12px;color:var(--sub)">'+weekdayCN(h.date)+'</div></td>'
-    +'<td><span class="badge bg-blue">'+esc(h.subject||'其他')+'</span> '+esc(h.content)+(h.photo?'<div style="margin-top:6px"><img src="'+h.photo+'" style="max-width:120px;max-height:120px;border-radius:8px"></div>':'')+'</td>'
-    +'<td>'+(h.completed?'<span class="badge bg-mint">✅ 已完成</span>':'<span class="badge bg-gray">未完成</span>')+'</td>'
-    +'<td><button class="btn btn-danger btn-sm" onclick="deleteHw(\''+h.id+'\')">删除</button></td></tr>').join('')||'<tr><td colspan="4" class="empty">暂无作业记录</td></tr>';
-  document.getElementById('parentContent').innerHTML='<div class="parent-tab-head"><h2>📝 作业记录</h2></div>'
-    +'<table class="tbl"><thead><tr><th>日期</th><th>作业内容</th><th>状态</th><th>操作</th></tr></thead><tbody>'+list+'</tbody></table>';
+  const form='<div class="panel"><h4>✏️ 家长录入作业</h4>'
+    +'<div class="form-grid">'
+    +'<div class="form-row"><label>学科</label><select id="phwSubject">'+['语文','数学','英语','其他'].map(x=>'<option>'+x+'</option>').join('')+'</select></div>'
+    +'<div class="form-row"><label>日期</label><input type="date" id="phwDate" value="'+todayStr()+'" style="width:100%"></div>'
+    +'</div>'
+    +'<div class="form-row"><label>作业内容（一条一条录入）</label><input id="phwContent" placeholder="如：语文第3课生字抄写；数学练习册P20-22"></div>'
+    +'<div><button class="btn btn-primary" onclick="addHomeworkByParent()">＋ 添加作业</button>'
+    +'<span style="font-size:12.5px;color:var(--sub);margin-left:10px">添加后自动出现在孩子端「今日打卡」对应学科，孩子需计时完成</span></div></div>';
+  const list=DB.homework.slice().sort((a,b)=>b.createdAt-a.createdAt).map(h=>{
+    const hc=getCheckin(h.date,'hw:'+h.id);
+    const stat=hc?statusBadge(hc):(h.completed?'<span class="badge bg-mint">✅ 已完成</span>':'<span class="badge bg-gray">待打卡</span>');
+    return '<tr>'
+      +'<td>'+cnMonthDay(h.date)+'<div style="font-size:12px;color:var(--sub)">'+weekdayCN(h.date)+'</div></td>'
+      +'<td><span class="badge bg-blue">'+esc(h.subject||'其他')+'</span> '+esc(h.content)
+        +(h.actualMinutes?'<div style="font-size:12px;color:var(--blue-deep);margin-top:3px">⏱ 用时 '+h.actualMinutes+' 分钟</div>':'')
+        +(h.photo?'<div style="margin-top:6px"><img src="'+h.photo+'" style="max-width:120px;max-height:120px;border-radius:8px"></div>':'')+'</td>'
+      +'<td>'+(h.by||'孩子')+'</td>'
+      +'<td>'+stat+'</td>'
+      +'<td><button class="btn btn-danger btn-sm" onclick="deleteHw(\''+h.id+'\')">删除</button></td></tr>';
+  }).join('')||'<tr><td colspan="5" class="empty">暂无作业记录</td></tr>';
+  document.getElementById('parentContent').innerHTML='<div class="parent-tab-head"><h2>📝 作业管理</h2></div>'+form
+    +'<table class="tbl"><thead><tr><th>日期</th><th>作业内容</th><th>录入人</th><th>状态</th><th>操作</th></tr></thead><tbody>'+list+'</tbody></table>';
+}
+function addHomeworkByParent(){
+  const content=document.getElementById('phwContent').value.trim();
+  const subject=document.getElementById('phwSubject').value;
+  const date=document.getElementById('phwDate').value||todayStr();
+  if(!content){ toast('请填写作业内容'); return; }
+  DB.homework.push({id:uid(), date, subject, content, photo:null, completed:false, by:'家长', createdAt:Date.now()});
+  persist(); toast('📓 已添加「'+subject+'」作业'); renderParentCurrentTab();
 }
 function deleteHw(id){ DB.homework=DB.homework.filter(x=>x.id!==id); persist(); renderParentCurrentTab(); toast('已删除'); }
 
