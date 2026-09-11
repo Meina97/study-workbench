@@ -343,6 +343,19 @@ input[type="month"]{width:100%}
 }
 
 .task-hw{font-size:13px;font-weight:600;color:#1f8f60;background:var(--mint-soft);border-radius:8px;padding:5px 10px;margin-top:6px;display:inline-block;line-height:1.4}
+/* ===== 课程排课方式选择器 ===== */
+.crs-modes{display:flex;gap:10px;flex-wrap:wrap}
+.crs-mode{padding:9px 16px;border-radius:12px;background:#f0f2fa;font-weight:700;font-size:14px;cursor:pointer;user-select:none}
+.crs-mode.active{background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff}
+.wd-chips{display:flex;gap:8px;flex-wrap:wrap}
+.wd-chip{padding:8px 14px;border-radius:12px;background:#f0f2fa;font-weight:700;font-size:14px;cursor:pointer;user-select:none}
+.wd-chip.on{background:var(--mint);color:#fff}
+.mini-cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:4px}
+.mini-cal .mc-dow{text-align:center;font-size:12px;color:var(--sub);font-weight:700}
+.mini-cal .mc-day{border-radius:10px;background:#f6f8ff;text-align:center;padding:8px 0;font-size:13px;cursor:pointer;font-weight:600}
+.mini-cal .mc-day.on{background:var(--blue);color:#fff}
+.mini-cal .mc-day.hol{background:#f2f2f7;color:#aaa}
+.mini-cal .mc-day.empty{background:transparent;cursor:default}
 </style>
 </head>
 <body>
@@ -573,6 +586,17 @@ function loadAll(){
   };
   // 合并自定义名称到预设库
   mergeCustomLibrary();
+  // 课程排课方式：兼容旧数据（把旧的「周二,周四 18:00」文本转为结构化字段）
+  DB.courses.forEach(function(c){
+    if(!c.scheduleMode){
+      const p=parseWeeklyTimes(c.weeklyTimes||'');
+      c.scheduleMode='weekly';
+      c.weekDays=p.days||[];
+      c.timeText=p.time||'';
+    }
+    if(!Array.isArray(c.weekDays)) c.weekDays=[];
+    if(!Array.isArray(c.dates)) c.dates=[];
+  });
 }
 function persist(){
   localStorage.setItem(LS.userInfo, JSON.stringify(DB.userInfo));
@@ -788,26 +812,32 @@ function generateMonthSchedule(month){
     });
   });
 
-  // ===== 课程：优先按"每周固定学习时间"生成；否则按每周次数分配 =====
+  // ===== 课程：① 每周固定（勾选星期） ② 不固定（手动选日期） =====
   DB.courses.filter(c=>c.enabled && c.planMonth===month).forEach(c=>{
-    const wt=parseWeeklyTimes(c.weeklyTimes);
     const target=parseFloat(c.targetUnits)||0;
+    const wt=parseWeeklyTimes(c.weeklyTimes||'');
+    const mode=c.scheduleMode||'weekly';
+    const wds=(Array.isArray(c.weekDays)&&c.weekDays.length)?c.weekDays:(wt.days||[]);
+    const timeText=c.timeText||wt.time||'';
+    const est=timeRangeMinutes(timeText)||45;
     let sessions=[];
-    if(wt.days.length){
-      // 固定时间：当月所有匹配的星期（含周末，跳过放假）
-      allDays.filter(ds=>wt.days.includes(dowOf(ds))).forEach(ds=>sessions.push({date:ds, est:timeRangeMinutes(wt.time)||45}));
+    const customDates=(Array.isArray(c.dates)?c.dates:[]).filter(d=>d.slice(0,7)===month).sort();
+    if(mode==='custom' && customDates.length){
+      customDates.forEach(d=>sessions.push({date:d, est}));
+    }else if(wds.length){
+      allDays.filter(ds=>wds.indexOf(dowOf(ds))>=0).forEach(ds=>sessions.push({date:ds, est}));
     }else{
-      // 无固定时间：按每周次数估算本月次数，分配到上学日
       const weeks=Math.max(1, Math.ceil(schoolDays.length/5));
       const count=Math.max(1, parseInt(c.weeklyCount)||1);
-      const total=Math.max(count*weeks, Math.ceil(target||1));
-      distributeSessions(total, schoolDays).forEach(({date})=>sessions.push({date, est:45}));
+      const totalN=Math.max(count*weeks, Math.ceil(target||1));
+      distributeSessions(totalN, schoolDays).forEach(s=>sessions.push({date:s.date, est:45}));
     }
+    sessions=sessions.filter(s=>DB.holidays.indexOf(s.date)<0);
     const S=sessions.length;
     sessions.forEach((s,k)=>{
       let name=c.name;
       if(target>0 && S>0) name=c.name+' · 第'+Math.max(1, Math.ceil((k+1)*target/S))+'讲';
-      else if(wt.time) name=c.name+' '+wt.time;
+      else if(timeText) name=c.name+' '+timeText;
       DB.schedule.push({id:'sch_'+month+'_crs_'+c.id+'_'+s.date+'_w'+k, date:s.date, month, materialId:c.id, src:'course',
         taskName:name, category:c.subject, estimatedMinutes:s.est, homework:(c.hw||'').trim(), auto:true, manual:false});
     });
@@ -1632,29 +1662,93 @@ function saveAid(id){
 
 /* ================= 课程管理（家长） ================= */
 function courseNames(subj){ return (COURSE_PRESETS[subj]||[]); }
-function courseHint(){
-  const wc=parseInt(document.getElementById('crsCount').value)||1;
-  const wt=document.getElementById('crsWeekly').value.trim();
-  const p=parseWeeklyTimes(wt);
-  let msg='每周学习 <b>'+wc+'</b> 次';
-  if(p.days.length) msg+=' · 固定时间：'+(p.days.map(d=>WEEK_CN[d-1]).join('、'))+(p.time?' '+p.time:'');
-  const month=document.getElementById('crsMonth').value;
-  if(month){
-    const {y,m}=parseMonth(month);
-    const n=daysInMonth(y,m);
-    let cnt=0;
-    for(let day=1;day<=n;day++){ const ds=fmtDate(new Date(y,m-1,day)); if(p.days.includes(dowOf(ds)) && !DB.holidays.includes(ds)) cnt++; }
-    msg+=' · '+monthCN(y,m)+'约 <b>'+cnt+'</b> 次课';
+let crsDates=[];
+function courseModeUI(mode){
+  const mv=document.getElementById('crsModeVal'); if(mv) mv.value=mode;
+  const wb=document.getElementById('crsWeeklyBox'), cb=document.getElementById('crsCustomBox');
+  const bw=document.getElementById('crsModeWeekly'), bc=document.getElementById('crsModeCustom');
+  if(wb) wb.style.display=(mode==='weekly')?'':'none';
+  if(cb) cb.style.display=(mode==='custom')?'':'none';
+  if(bw) bw.classList.toggle('active', mode==='weekly');
+  if(bc) bc.classList.toggle('active', mode==='custom');
+  if(mode==='custom') renderCourseCalendar();
+  courseHint();
+}
+function renderCourseCalendar(){
+  const box=document.getElementById('crsCal'); if(!box) return;
+  const mEl=document.getElementById('crsMonth');
+  const month=(mEl&&mEl.value)?mEl.value:monthStr(new Date());
+  const ym=parseMonth(month);
+  const total=daysInMonth(ym.y,ym.m);
+  const first=dowOf(ym.y+'-'+String(ym.m).padStart(2,'0')+'-01');
+  let html=WEEK_CN.map(w=>'<div class="mc-dow">'+w.replace('周','')+'</div>').join('');
+  for(let i=0;i<first-1;i++) html+='<div class="mc-day empty"></div>';
+  for(let day=1; day<=total; day++){
+    const ds=ym.y+'-'+String(ym.m).padStart(2,'0')+'-'+String(day).padStart(2,'0');
+    const on=crsDates.indexOf(ds)>=0, hol=DB.holidays.indexOf(ds)>=0;
+    html+='<div class="mc-day'+(on?' on':'')+(hol?' hol':'')+'" onclick="toggleCourseDate(\''+ds+'\')">'+day+(hol?'<div style="font-size:10px">假</div>':'')+'</div>';
   }
-  document.getElementById('crsHint').innerHTML=msg;
+  box.innerHTML=html;
+  const cnt=document.getElementById('crsDateCount');
+  if(cnt) cnt.textContent='已选 '+crsDates.length+' 天';
+}
+function toggleCourseDate(ds){
+  const i=crsDates.indexOf(ds);
+  if(i>=0) crsDates.splice(i,1); else crsDates.push(ds);
+  crsDates.sort();
+  renderCourseCalendar(); courseHint();
+}
+function clearCourseDates(){ crsDates=[]; renderCourseCalendar(); courseHint(); }
+function onCourseMonthChange(){
+  const mEl=document.getElementById('crsMonth');
+  const month=(mEl&&mEl.value)?mEl.value:monthStr(new Date());
+  const before=crsDates.length;
+  crsDates=crsDates.filter(d=>d.slice(0,7)===month);
+  if(before!==crsDates.length) toast('计划月份已改变，已清除不属于该月的日期');
+  renderCourseCalendar(); courseHint();
+}
+function selectedWeekDays(){
+  const chips=document.querySelectorAll('#crsWeeklyBox .wd-chip.on');
+  const out=[]; for(let i=0;i<chips.length;i++) out.push(parseInt(chips[i].getAttribute('data-wd')));
+  return out;
+}
+function courseHint(){
+  const mEl=document.getElementById('crsMonth');
+  const month=(mEl&&mEl.value)?mEl.value:monthStr(new Date());
+  const vEl=document.getElementById('crsModeVal');
+  const mode=(vEl&&vEl.value)?vEl.value:'weekly';
+  let msg='';
+  if(mode==='weekly'){
+    const wds=selectedWeekDays();
+    if(!wds.length){ msg='⚠️ 请勾选每周上课的星期（例：周二、周四）；若时间不固定，请选「不固定」并在日历上点选日期'; }
+    else{
+      const ym=parseMonth(month), n=daysInMonth(ym.y,ym.m); let cnt=0;
+      for(let day=1;day<=n;day++){ const ds=fmtDate(new Date(ym.y,ym.m-1,day)); if(wds.indexOf(dowOf(ds))>=0 && DB.holidays.indexOf(ds)<0) cnt++; }
+      const tEl=document.getElementById('crsTime');
+      const t=(tEl&&tEl.value)?tEl.value:'';
+      msg='每周：'+wds.map(d=>WEEK_CN[d-1]).join('、')+(t?' '+t:'')+' · '+monthCN(ym.y,ym.m)+'约 <b>'+cnt+'</b> 次课（已跳过标记的放假日）';
+    }
+  }else{
+    msg=crsDates.length?('已选 <b>'+crsDates.length+'</b> 个上课日期：'+crsDates.map(d=>cnMonthDay(d)).join('、')):'⚠️ 请在日历上点选上课日期（可多选）';
+  }
+  const el=document.getElementById('crsHint'); if(el) el.innerHTML=msg;
 }
 function renderCourses(){
   const rows=DB.courses.map(c=>{
-    const wt=parseWeeklyTimes(c.weeklyTimes);
-    const daysTxt=wt.days.length?wt.days.map(d=>WEEK_CN[d-1]).join('、'):('每周'+(c.weeklyCount||1)+'次（时间不固定）');
+    const wt=parseWeeklyTimes(c.weeklyTimes||'');
+    const wds=(Array.isArray(c.weekDays)&&c.weekDays.length)?c.weekDays:(wt.days||[]);
+    const tTxt=c.timeText||wt.time||'';
+    let daysTxt;
+    if((c.scheduleMode||'weekly')==='custom' && (c.dates||[]).length){
+      daysTxt='指定日期：'+c.dates.slice().sort().map(d=>cnMonthDay(d)).join('、')+'（共'+c.dates.length+'天）';
+    } else if(wds.length){
+      daysTxt='每周：'+wds.map(d=>WEEK_CN[d-1]).join('、');
+    } else {
+      daysTxt='未指定星期（按每周'+(c.weeklyCount||1)+'次分散到上学日）';
+    }
     return '<tr>'
       +'<td>'+catDot(c.subject)+' <b>'+esc(c.subject)+'</b></td>'
-      +'<td><b>'+esc(c.name)+'</b><div style="font-size:12px;color:var(--sub)">'+daysTxt+(wt.time?' '+wt.time:'')+'</div>'+(c.hw?'<div style="font-size:12px;color:var(--blue-deep);margin-top:3px">📝 '+esc(c.hw)+'</div>':'')+'</td>'
+      +'<td><b>'+esc(c.name)+'</b><div style="font-size:12px;color:var(--sub)">'+daysTxt+(tTxt?' '+tTxt:'')+'</div>'+(c.hw?'<div style="font-size:12px;color:var(--blue-deep);margin-top:3px">📝 '+esc(c.hw)+'</div>':'')+'</td>'
       +'<td>'+esc(c.planMonth||'—')+'</td>'
       +'<td>总'+(c.totalUnits||0)+'讲 · 本月目标 '+(c.targetUnits||0)+'讲</td>'
       +'<td>'+(c.enabled?'<span class="badge bg-mint">启用</span>':'<span class="badge bg-gray">停用</span>')+'</td>'
@@ -1667,22 +1761,43 @@ function renderCourses(){
   const html='<div class="parent-tab-head"><h2>🎓 课程管理</h2>'
     +'<div><button class="btn btn-ghost" onclick="regenerateAll()">⚡ 重新生成全部排期</button> '
     +'<button class="btn btn-primary" onclick="editCourse(null)">＋ 添加课程</button></div></div>'
-    +'<div class="panel"><p style="font-size:13.5px;color:#6a7295;line-height:1.7">💡 <b>课程排期逻辑：</b>填写「每周固定学习时间」（如 周二,周四 18:00-18:45）→ 课程自动固定在对应日期（含周末，跳过放假）；不填则按「每周学习次数」在本月上学日分配。填写「本月目标讲数」后，每次课自动标注「第X讲」。</p></div>'
+    +'<div class="panel"><p style="font-size:13.5px;color:#6a7295;line-height:1.7">💡 <b>课程排课方式（二选一）：</b><br>① <b>每周固定</b>：勾选每周上课的星期（可含周末），系统在该月每个对应星期生成课程任务；<br>② <b>不固定</b>：在日历上点选具体上课日期，只在这些天生成任务。<br>两种方式都会<b>自动跳过你在排期日历里标记的放假日期</b>。填写「本月目标讲数」后，每次课会自动标注「第X讲」。</p></div>'
     +'<table class="tbl"><thead><tr><th>学科</th><th>课程名称</th><th>计划月份</th><th>进度</th><th>状态</th><th>操作</th></tr></thead><tbody>'+rows+'</tbody></table>';
   document.getElementById('parentContent').innerHTML=html;
 }
 function courseFormHTML(c){
+  const curMonth=c?(c.planMonth||monthStr(new Date())):monthStr(new Date());
+  const wt=parseWeeklyTimes((c&&c.weeklyTimes)||'');
+  const wds=(c&&Array.isArray(c.weekDays)&&c.weekDays.length)?c.weekDays:(wt.days||[]);
+  const timeText=c?(c.timeText||wt.time||''):'';
   return '<h3>'+(c?'✏️ 编辑课程':'➕ 添加课程')+'</h3>'
     +'<div class="form-grid">'
     +'<div class="form-row"><label>学科</label><select id="crsSubject" onchange="onCourseSubjectChange()">'
     +['语文','数学','英语','兴趣'].map(s=>'<option'+(c&&c.subject===s?' selected':'')+'>'+s+'</option>').join('')+'</select></div>'
     +'<div class="form-row"><label>课程名称（预设库）</label><select id="crsNameSelect" onchange="document.getElementById(\'crsNameCustom\').value=this.value"></select></div>'
     +'<div class="form-row"><label>或手动输入自定义名称</label><input id="crsNameCustom" placeholder="输入后自动加入预设库"></div>'
-    +'<div class="form-row"><label>每周学习次数</label><input id="crsCount" type="number" min="1" value="'+(c?(c.weeklyCount||1):1)+'" oninput="courseHint()"></div>'
-    +'<div class="form-row"><label>每周固定学习时间（可填多个星期）</label><input id="crsWeekly" placeholder="例：周二,周四 18:00-18:45" value="'+(c?esc(c.weeklyTimes||''):'')+'" oninput="courseHint()"></div>'
+    +'<div class="form-row"><label>计划完成月份</label><input id="crsMonth" type="month" value="'+curMonth+'" onchange="onCourseMonthChange()"></div>'
     +'<div class="form-row"><label>总单元/总讲数</label><input id="crsTotal" type="number" min="0" value="'+(c?(c.totalUnits||0):0)+'"></div>'
     +'<div class="form-row"><label>本月目标单元数/讲数</label><input id="crsTarget" type="number" min="0" value="'+(c?(c.targetUnits||0):0)+'"></div>'
-    +'<div class="form-row"><label>计划完成月份</label><input id="crsMonth" type="month" value="'+(c?(c.planMonth||''):monthStr(new Date()))+'" onchange="courseHint()"></div>'
+    +'<div class="form-row"><label>每周学习次数（参考值，仅用于核对）</label><input id="crsCount" type="number" min="1" value="'+(c?(c.weeklyCount||1):1)+'"></div>'
+    +'</div>'
+    +'<input type="hidden" id="crsModeVal" value="weekly">'
+    +'<div class="form-row"><label>排课方式</label><div class="crs-modes">'
+    +'<div class="crs-mode active" id="crsModeWeekly" onclick="courseModeUI(\'weekly\')">📅 每周固定</div>'
+    +'<div class="crs-mode" id="crsModeCustom" onclick="courseModeUI(\'custom\')">🗓 不固定（手动选日期）</div>'
+    +'</div></div>'
+    +'<div id="crsWeeklyBox">'
+    +'<div class="form-row"><label>每周哪几天上课（可多选，含周末）</label><div class="wd-chips">'
+    +WEEK_CN.map((w,i)=>'<div class="wd-chip'+(wds.indexOf(i+1)>=0?' on':'')+'" data-wd="'+(i+1)+'" onclick="this.classList.toggle(\'on\');courseHint()">'+w+'</div>').join('')
+    +'</div></div>'
+    +'<div class="form-row"><label>上课时间（可选）</label><input id="crsTime" placeholder="18:30-19:10" value="'+esc(timeText)+'" oninput="courseHint()"></div>'
+    +'</div>'
+    +'<div id="crsCustomBox" style="display:none">'
+    +'<div class="form-row"><label>选择上课日期（在日历上点选，可多选）</label>'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+    +'<span class="badge bg-blue" id="crsDateCount">已选 0 天</span>'
+    +'<button class="btn btn-ghost btn-sm" onclick="clearCourseDates()">清空选择</button></div>'
+    +'<div class="mini-cal" id="crsCal"></div></div>'
     +'</div>'
     +'<div class="form-row"><label>每次作业内容（孩子课后完成，会显示在当天课程卡片上）</label><textarea id="crsHw" rows="2" style="width:100%;resize:vertical" placeholder="如：练习册 U3 P18-20 + 单词抄写">'+esc(c?(c.hw||''):'')+'</textarea></div>'
     +'<div id="crsHint" class="hint" style="background:var(--purple-soft);border-radius:10px;padding:10px 12px;color:#6c58d6;font-size:13.5px"></div>'
@@ -1698,6 +1813,7 @@ function onCourseSubjectChange(){
 }
 function editCourse(id){
   const c=id?DB.courses.find(x=>x.id===id):null;
+  crsDates=(c&&Array.isArray(c.dates))?c.dates.slice():[];
   openModal(courseFormHTML(c), true);
   onCourseSubjectChange();
   if(c){
@@ -1705,7 +1821,7 @@ function editCourse(id){
     onCourseSubjectChange();
     if(c.name){ document.getElementById('crsNameSelect').value=c.name; if(!courseNames(c.subject).includes(c.name)) document.getElementById('crsNameCustom').value=c.name; }
   }
-  courseHint();
+  courseModeUI((c&&c.scheduleMode)||'weekly');
 }
 function saveCourse(id){
   const subj=document.getElementById('crsSubject').value;
@@ -1713,26 +1829,35 @@ function saveCourse(id){
   const customName=document.getElementById('crsNameCustom').value.trim();
   const name=customName||selName;
   if(!name){ toast('请填写课程名称'); return; }
+  const mode=document.getElementById('crsModeVal').value||'weekly';
+  const wds=selectedWeekDays();
+  const timeText=document.getElementById('crsTime').value.trim();
+  const month=document.getElementById('crsMonth').value||monthStr(new Date());
+  if(mode==='weekly' && !wds.length){ toast('请勾选每周上课的星期；若时间不固定，请选「不固定」并在日历上点选日期'); return; }
+  const dates=crsDates.filter(d=>d.slice(0,7)===month).sort();
+  if(mode==='custom' && !dates.length){ toast('请在日历上至少选择一个上课日期'); return; }
   if(customName && !courseNames(subj).includes(customName)){
     if(!DB.customLibrary.courses[subj]) DB.customLibrary.courses[subj]=[];
     DB.customLibrary.courses[subj].push(customName);
     if(!COURSE_PRESETS[subj]) COURSE_PRESETS[subj]=[];
     if(!COURSE_PRESETS[subj].includes(customName)) COURSE_PRESETS[subj].push(customName);
   }
-  const data={subject:subj, name,
+  const data={subject:subj, name, scheduleMode:mode,
+    weekDays:(mode==='weekly'?wds:[]),
+    dates:(mode==='custom'?dates:[]),
+    timeText:timeText,
+    weeklyTimes:(mode==='weekly'?wds.map(d=>WEEK_CN[d-1]).join(',')+(timeText?' '+timeText:''):''),
     weeklyCount:parseInt(document.getElementById('crsCount').value)||1,
-    weeklyTimes:document.getElementById('crsWeekly').value.trim(),
     totalUnits:parseFloat(document.getElementById('crsTotal').value)||0,
     targetUnits:parseFloat(document.getElementById('crsTarget').value)||0,
-    planMonth:document.getElementById('crsMonth').value,
+    planMonth:month,
     hw:document.getElementById('crsHw').value.trim(), enabled:true};
   let c;
   if(id){ c=DB.courses.find(x=>x.id===id); Object.assign(c,data); }
   else { c=Object.assign({id:uid()},data); DB.courses.push(c); }
-  if(c.planMonth) generateMonthSchedule(c.planMonth);
+  generateMonthSchedule(c.planMonth);
   persist(); closeModal(); toast('✅ 已保存并生成排期'); renderParentCurrentTab();
 }
-
 /* ================= 排期日历（家长） ================= */
 let calMonth=monthStr(new Date());
 function renderParentCalendar(){
