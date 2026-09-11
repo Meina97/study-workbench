@@ -2758,6 +2758,24 @@ function saveSyncSettings(){
   renderParentCurrentTab();
 }
 
+/* ================= 自动更新检测（避免 iPad/浏览器使用旧缓存） ================= */
+async function checkAppUpdate(){
+  try{
+    const r=await fetch('version.json?t='+Date.now(), {cache:'no-store'});
+    if(!r.ok) return;
+    const j=await r.json();
+    if(!j || !j.ver) return;
+    const seen=localStorage.getItem('g3_appver');
+    if(!seen){ localStorage.setItem('g3_appver', j.ver); return; }   // 首次只做记录
+    if(seen!==j.ver){
+      if(sessionStorage.getItem('g3_uptried')===j.ver) return;        // 防止反复刷新
+      sessionStorage.setItem('g3_uptried', j.ver);
+      localStorage.setItem('g3_appver', j.ver);
+      location.replace(location.pathname+'?v='+encodeURIComponent(j.ver));
+    }
+  }catch(e){}
+}
+
 /* ================= 初始化 ================= */
 function init(){
   loadAll();
@@ -2784,6 +2802,9 @@ function init(){
   startTicker();
   if(getActiveTimer()) openTimerOverlay();
   initCloudSync();
+  checkAppUpdate();
+  setInterval(checkAppUpdate, 10*60*1000);
+  document.addEventListener('visibilitychange', function(){ if(!document.hidden) checkAppUpdate(); });
 }
 document.addEventListener('DOMContentLoaded', init);
 </script>

@@ -152,6 +152,8 @@ echo "→ [4/6] 准备文件并提交…"
 REPO="study-workbench"
 git init -q
 git branch -M main
+# 生成版本号：客户端据此自动检测更新（避免 iPad/浏览器一直用旧缓存）
+printf '{"ver":"%s"}' "$(date '+%Y%m%d%H%M%S')" > version.json
 git add -A
 if ! git -c user.name="$OWNER" -c user.email="$OWNER@users.noreply.github.com" commit -q -m "部署工作台 $(date '+%Y-%m-%d %H:%M')"; then
   echo "  （没有新更改，继续）"
