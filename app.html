@@ -832,7 +832,8 @@ function generateMonthSchedule(month){
     if(item.planMonth!==month) return false; // 计划月份改走
     const start=schedStart(month, item.fromToday);
     if(start===null) return true;            // 过去月份：保留历史
-    return x.date<start;                     // 起始日之前的保留
+    if(x.backfill) return false;             // 之前“补排”的过去任务：按新规则清除重建
+    return x.date<start;                     // 起始日之前的真实历史保留
   });
 
   // ===== 教辅 =====
@@ -2177,7 +2178,7 @@ function onCourseSubjectChange(){
 }
 function editCourse(id){
   const c=id?DB.courses.find(x=>x.id===id):null;
-  crsDates=(c&&Array.isArray(c.dates))?c.dates.slice():[];
+  pickerDates['crs']=(c&&Array.isArray(c.dates))?c.dates.slice():[];
   openModal(courseFormHTML(c), true);
   onCourseSubjectChange();
   if(c){
@@ -2194,11 +2195,11 @@ function saveCourse(id){
   const name=customName||selName;
   if(!name){ toast('请填写课程名称'); return; }
   const mode=document.getElementById('crsModeVal').value||'weekly';
-  const wds=selectedWeekDays();
+  const wds=selectedWeekDays('crs');
   const timeText=document.getElementById('crsTime').value.trim();
   const month=document.getElementById('crsMonth').value||monthStr(new Date());
   if(mode==='weekly' && !wds.length){ toast('请勾选每周上课的星期；若时间不固定，请选「不固定」并在日历上点选日期'); return; }
-  const dates=crsDates.filter(d=>d.slice(0,7)===month).sort();
+  const dates=(pickerDates['crs']||[]).filter(d=>d.slice(0,7)===month).sort();
   if(mode==='custom' && !dates.length){ toast('请在日历上至少选择一个上课日期'); return; }
   if(customName && !courseNames(subj).includes(customName)){
     if(!DB.customLibrary.courses[subj]) DB.customLibrary.courses[subj]=[];
