@@ -436,7 +436,7 @@ const LS = {
   userInfo:'g3_userInfo', settings:'g3_settings', schedule:'g3_schedule',
   tasks:'g3_tasks', checkins:'g3_checkins', homework:'g3_homework', points:'g3_points',
   routine:'g3_routine', holidays:'g3_holidays', streakMeta:'g3_streakMeta', customLibrary:'g3_customLibrary',
-  studyAids:'g3_studyAids', courses:'g3_courses'
+  studyAids:'g3_studyAids', courses:'g3_courses', skips:'g3_skips'
 };
 const LS_OLD_MATERIALS='g3_materials';
 const SS_TIMER = 'g3_activeTimer';
@@ -586,6 +586,7 @@ function loadAll(){
     points: (function(){ const p=get(LS.points,null); if(!p) return defaultPoints(); return Object.assign(defaultPoints(), p); })(),
     routine: Object.assign(defaultRoutine(), get(LS.routine, {})),
     holidays: get(LS.holidays, []),
+    skips: get(LS.skips, []),
     streakMeta: Object.assign({awardedBlocks:0}, get(LS.streakMeta, {})),
     customLibrary: {aids:customAids, courses:customCourses}
   };
@@ -614,6 +615,7 @@ function loadAll(){
   // 积分配置补齐（老数据没有逾期扣分字段）
   DB.points.config=Object.assign({perTask:10, streakDays:7, streakBonus:20,
     overdueOn:true, overdueBase:2, overdueDouble:true, overdueCap:20, minPoints:0}, DB.points.config||{});
+  if(!Array.isArray(DB.skips)) DB.skips=[];
   if(!DB.points.settled) DB.points.settled={};
   if(typeof DB.points.settleFrom!=='string') DB.points.settleFrom='';
 }
@@ -629,6 +631,7 @@ function persist(){
   localStorage.setItem(LS.points, JSON.stringify(DB.points));
   localStorage.setItem(LS.routine, JSON.stringify(DB.routine));
   localStorage.setItem(LS.holidays, JSON.stringify(DB.holidays));
+  localStorage.setItem(LS.skips, JSON.stringify(DB.skips||[]));
   localStorage.setItem(LS.streakMeta, JSON.stringify(DB.streakMeta));
   localStorage.setItem(LS.customLibrary, JSON.stringify(DB.customLibrary));
   localStorage.removeItem(LS_OLD_MATERIALS);
@@ -712,7 +715,8 @@ function hwDueText(h, ds){
 }
 function buildDayTasks(dateStr){
   const list=[];
-  DB.tasks.filter(t=>taskAppears(t,dateStr)).sort((a,b)=>a.order-b.order).forEach(t=>{
+  const skipKeys=(DB.skips||[]).filter(function(sk){ return sk.date===dateStr; }).map(function(sk){ return sk.key; });
+  DB.tasks.filter(t=>taskAppears(t,dateStr)).filter(function(t){ return skipKeys.indexOf('tpl:'+t.id)<0; }).sort((a,b)=>a.order-b.order).forEach(t=>{
     const key='tpl:'+t.id;
     list.push({key, category:t.category, name:t.name, estimatedMinutes:t.estimatedMinutes, taskId:t.id, source:'template', estOrder:t.order||0, checkin:getCheckin(dateStr,key)});
   });
@@ -2308,18 +2312,113 @@ function toggleHoliday(ds){
   persist(); renderParentCurrentTab();
 }
 function showParentDay(ds){
-  const entries=DB.schedule.filter(s=>s.date===ds);
-  const rows=entries.map(e=>'<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed var(--line)">'
-    +'<div style="font-weight:700;font-size:14px">'+catDot(e.category)+' '+esc(e.taskName)+'<div style="font-size:12px;color:var(--sub);font-weight:400">'+(e.estimatedMinutes?'预计'+e.estimatedMinutes+'分钟':'')+(e.auto?' · 自动':' · 手动')+'</div></div>'
-    +'<button class="btn btn-danger btn-sm" onclick="deleteScheduleEntry(\''+e.id+'\')">删除</button></div>').join('')||'<div class="empty" style="padding:16px">当天无任务</div>';
-  openModal('<h3>📅 '+cnMonthDay(ds)+' '+weekdayCN(ds)+'</h3>'+rows
+  const items=buildDayTasks(ds);
+  const hwItems=DB.homework.filter(function(h){ return h.date===ds; });
+  const moved=(DB.skips||[]).filter(function(sk){ return sk.date===ds; });
+  let rows='';
+  items.forEach(function(it){
+    const c=it.checkin;
+    const done=!!(c&&(c.status==='approved'||c.status==='pending_review'));
+    const src=(it.source==='schedule')?((it.backfill)?'排期·补排':'排期'):'循环任务';
+    rows+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line)">'
+      +'<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:14px">'+catDot(it.category)+' '+esc(it.name)+'</div>'
+      +'<div style="font-size:12px;color:var(--sub)">'+it.category+' · '+src+(it.estimatedMinutes?' · 预计'+it.estimatedMinutes+'分钟':'')+(done?' · <b style="color:#1f8f60">已完成</b>':'')+'</div></div>'
+      +'<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">'
+      +(done?'':'<button class="btn btn-ghost btn-sm" onclick="askMoveTask(\''+ds+'\',\''+esc(it.key)+'\',\''+esc(it.name).replace(/'/g,"\\'")+'\')">↗️ 移到…</button>')
+      +(it.source==='schedule'?'<button class="btn btn-danger btn-sm" onclick="deleteScheduleEntry(\''+it.taskId+'\')">删除</button>':'')
+      +'</div></div>';
+  });
+  hwItems.forEach(function(h){
+    rows+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line)">'
+      +'<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:14px">📓 '+esc(h.content)+'</div>'
+      +'<div style="font-size:12px;color:var(--sub)">学校作业 · 期限 '+cnMonthDay(hwDue(h))+(h.completed?' · <b style="color:#1f8f60">已完成</b>':'')+'</div></div>'
+      +'<div style="display:flex;gap:6px;justify-content:flex-end">'
+      +(h.completed?'':'<button class="btn btn-ghost btn-sm" onclick="askMoveTask(\''+ds+'\',\'hw:'+h.id+'\',\'📓 '+esc(h.content).replace(/'/g,"\\'")+'\')">↗️ 移到…</button>')
+      +'</div></div>';
+  });
+  if(!rows) rows='<div class="empty" style="padding:16px">当天无任务</div>';
+  const movedTxt=moved.length?('<div style="font-size:12px;color:var(--sub);line-height:1.8;background:#f6f8ff;border-radius:10px;padding:8px 10px;margin-top:8px">↗️ 已挪走 '+moved.length+' 项：'+moved.map(function(sk){ return cnMonthDay(sk.target||'')+'（'+(sk.key.indexOf('tpl:')===0?'循环任务':'排期任务')+'）'; }).join('、')+'</div>'):'';
+  openModal('<h3>📅 '+cnMonthDay(ds)+' '+weekdayCN(ds)+'</h3>'
+    +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'
+    +'<button class="btn btn-orange btn-sm" onclick="askMoveAll(\''+ds+'\')">🎯 整天顺延到另一天</button>'
+    +'<span style="font-size:12px;color:var(--sub)">孩子生病/临时有事时，一键把当天未完成任务挪走</span></div>'
+    +rows+movedTxt
     +'<h4 style="margin:16px 0 10px;font-size:15px;font-weight:800">➕ 手动添加任务</h4>'
     +'<div class="form-grid">'
     +'<div class="form-row"><label>任务名称</label><input id="dayTaskName" placeholder="如：口算练习30题"></div>'
     +'<div class="form-row"><label>学科分类</label><select id="dayTaskCat">'+CATS.map(c=>'<option>'+c+'</option>').join('')+'</select></div>'
     +'<div class="form-row"><label>预计用时（分钟）</label><input id="dayTaskMin" type="number" min="5" value="20"></div>'
     +'</div>'
-    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button><button class="btn btn-primary" onclick="addManualTask(\''+ds+'\')">添加任务</button></div>');
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button><button class="btn btn-primary" onclick="addManualTask(\''+ds+'\')">添加任务</button></div>', true);
+}
+function moveAnyTask(fromDate, key, target, silent){
+  if(!target || target===fromDate) return false;
+  if(key.indexOf('tpl:')===0){
+    const t=DB.tasks.find(function(x){ return x.id===key.slice(4); }); if(!t) return false;
+    if(!Array.isArray(DB.skips)) DB.skips=[];
+    if(!DB.skips.some(function(sk){ return sk.date===fromDate && sk.key===key; })) DB.skips.push({date:fromDate, key:key, target:target});
+    DB.schedule.push({id:uid(), date:target, month:target.slice(0,7), materialId:null, src:'manual',
+      taskName:t.name, category:t.category, estimatedMinutes:t.estimatedMinutes, auto:false, manual:true, movedFrom:fromDate});
+  }else if(key.indexOf('sch:')===0){
+    const e=DB.schedule.find(function(x){ return x.id===key.slice(4); }); if(!e) return false;
+    const ck='sch:'+e.id, c=getCheckin(e.date, ck);
+    if(e.auto){
+      const ne=Object.assign({}, e, {id:uid(), date:target, month:target.slice(0,7), auto:false, manual:true, movedFrom:e.date});
+      DB.schedule.push(ne);
+      if(c){ c.date=target; c.key='sch:'+ne.id; }
+      DB.schedule=DB.schedule.filter(function(x){ return x.id!==e.id; });
+    }else{
+      e.date=target; e.month=target.slice(0,7);
+      if(c) c.date=target;
+    }
+  }else if(key.indexOf('hw:')===0){
+    const h=DB.homework.find(function(x){ return x.id===key.slice(3); }); if(!h) return false;
+    const span=Math.max(0, daysBetween(h.date, hwDue(h)));
+    h.date=target;
+    h.due=fmtDate(new Date(new Date(target+'T00:00:00').getTime()+span*86400000));
+  }else return false;
+  if(!silent){ persist(); renderParentCurrentTab(); toast('✅ 已挪到 '+cnMonthDay(target)); }
+  return true;
+}
+function askMoveTask(fromDate, key, name){
+  const tmr=fmtDate(new Date(Date.now()+86400000));
+  openModal('<h3>↗️ 移动到另一天</h3>'
+    +'<p style="font-size:14px;color:#555c7e;line-height:1.7">任务：<b>'+esc(name)+'</b><br><span style="font-size:12.5px;color:var(--sub)">原日期：'+cnMonthDay(fromDate)+' '+weekdayCN(fromDate)+'</span></p>'
+    +'<div class="form-row"><label>移动到哪一天</label><input type="date" id="mvDate" value="'+tmr+'" style="width:100%"></div>'
+    +'<p style="font-size:12px;color:var(--sub)">说明：循环任务（如晨读）在原日期会不再显示、在目标日期新增一次；教辅/课程排期任务与作业会直接改到目标日期；已完成（含待审核）的任务不会被移动。</p>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
+    +'<button class="btn btn-primary" onclick="doMoveAnyTask(\''+fromDate+'\',\''+esc(key)+'\')">确认移动</button></div>');
+}
+function doMoveAnyTask(fromDate, key){
+  const target=document.getElementById('mvDate').value;
+  if(!target){ toast('请选择日期'); return; }
+  moveAnyTask(fromDate, key, target, false);
+  closeModal();
+}
+function askMoveAll(fromDate){
+  const tmr=fmtDate(new Date(Date.now()+86400000));
+  openModal('<h3>🎯 整天顺延</h3>'
+    +'<p style="font-size:14px;color:#555c7e;line-height:1.7">把 <b>'+cnMonthDay(fromDate)+' '+weekdayCN(fromDate)+'</b> 当天<b>所有未完成</b>的任务（含作业）整体挪到另一天。</p>'
+    +'<div class="form-row"><label>顺延到哪一天</label><input type="date" id="mvAllDate" value="'+tmr+'" style="width:100%"></div>'
+    +'<p style="font-size:12px;color:var(--sub)">适合孩子生病、临时有事的情况。已完成或待审核的任务不受影响。</p>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
+    +'<button class="btn btn-primary" onclick="doMoveAll(\''+fromDate+'\')">确认顺延</button></div>');
+}
+function doMoveAll(fromDate){
+  const target=document.getElementById('mvAllDate').value;
+  if(!target){ toast('请选择日期'); return; }
+  let n=0;
+  buildDayTasks(fromDate).forEach(function(it){
+    const c=it.checkin;
+    const done=!!(c&&(c.status==='approved'||c.status==='pending_review'));
+    if(done) return;
+    if(moveAnyTask(fromDate, it.key, target, true)) n++;
+  });
+  DB.homework.filter(function(h){ return h.date===fromDate && !h.completed; }).forEach(function(h){
+    if(moveAnyTask(fromDate, 'hw:'+h.id, target, true)) n++;
+  });
+  persist(); closeModal(); renderParentCurrentTab();
+  toast(n?('✅ 已把 '+n+' 项任务挪到 '+cnMonthDay(target)):'当天没有需要挪动的未完成任务');
 }
 function addManualTask(ds){
   const name=document.getElementById('dayTaskName').value.trim();
