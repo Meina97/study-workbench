@@ -2287,7 +2287,9 @@ function dropTask(e,ds){
   if(id) moveScheduleEntry(id,ds);
 }
 function moveScheduleEntry(id,ds){
-  const e=DB.schedule.find(x=>x.id===id); if(!e||e.date===ds) return;
+  const e=DB.schedule.find(x=>x.id===id);
+  if(!e) return;
+  if(e.date===ds){ toast('目标日期与当前日期相同，没有移动'); return; }
   const oldKey='sch:'+e.id;
   const c=getCheckin(e.date, oldKey);
   if(e.auto){
@@ -2351,8 +2353,12 @@ function showParentDay(ds){
     +'</div>'
     +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button><button class="btn btn-primary" onclick="addManualTask(\''+ds+'\')">添加任务</button></div>', true);
 }
+function nextDayStr(ds){
+  const d=new Date(ds+'T00:00:00'); d.setDate(d.getDate()+1); return fmtDate(d);
+}
 function moveAnyTask(fromDate, key, target, silent){
-  if(!target || target===fromDate) return false;
+  if(!target){ if(!silent) toast('请选择要移动到的日期'); return false; }
+  if(target===fromDate){ if(!silent) toast('目标日期与当前日期相同，没有移动'); return false; }
   if(key.indexOf('tpl:')===0){
     const t=DB.tasks.find(function(x){ return x.id===key.slice(4); }); if(!t) return false;
     if(!Array.isArray(DB.skips)) DB.skips=[];
@@ -2381,7 +2387,7 @@ function moveAnyTask(fromDate, key, target, silent){
   return true;
 }
 function askMoveTask(fromDate, key, name){
-  const tmr=fmtDate(new Date(Date.now()+86400000));
+  const tmr=nextDayStr(fromDate);
   openModal('<h3>↗️ 移动到另一天</h3>'
     +'<p style="font-size:14px;color:#555c7e;line-height:1.7">任务：<b>'+esc(name)+'</b><br><span style="font-size:12.5px;color:var(--sub)">原日期：'+cnMonthDay(fromDate)+' '+weekdayCN(fromDate)+'</span></p>'
     +'<div class="form-row"><label>移动到哪一天</label><input type="date" id="mvDate" value="'+tmr+'" style="width:100%"></div>'
@@ -2431,7 +2437,7 @@ function editScheduleEntry(id){
   openModal('<h3>✏️ 任务详情</h3>'
     +'<p style="font-size:15px;font-weight:700">'+catDot(e.category)+' '+esc(e.taskName)+'</p>'
     +'<p style="font-size:13px;color:var(--sub);margin-top:6px">当前日期：'+cnMonthDay(e.date)+' · '+(e.auto?'系统自动排期':'手动添加')+'</p>'
-    +'<div class="form-row" style="margin-top:12px"><label>移动到其它日期</label><input type="date" id="moveDate" value="'+e.date+'"></div>'
+    +'<div class="form-row" style="margin-top:12px"><label>移动到其它日期（默认已填次日）</label><input type="date" id="moveDate" value="'+nextDayStr(e.date)+'"></div>'
     +'<div class="form-actions">'
     +'<button class="btn btn-danger" onclick="deleteScheduleEntry(\''+e.id+'\');closeModal()">删除</button>'
     +'<button class="btn btn-ghost" onclick="closeModal()">取消</button>'
@@ -2440,6 +2446,8 @@ function editScheduleEntry(id){
 function doMoveEntry(id){
   const ds=document.getElementById('moveDate').value;
   if(!ds){ toast('请选择日期'); return; }
+  const e=DB.schedule.find(function(x){ return x.id===id; });
+  if(e && e.date===ds){ toast('目标日期与当前日期相同，没有移动'); return; }
   closeModal(); moveScheduleEntry(id,ds);
 }
 function deleteScheduleEntry(id){
