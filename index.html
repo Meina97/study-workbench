@@ -510,7 +510,8 @@ function defaultRoutine(){
 function defaultPoints(){
   return {
     config:{perTask:10, streakDays:7, streakBonus:20,
-            overdueOn:true, overdueBase:2, overdueDouble:true, overdueCap:20, minPoints:0},
+            overdueOn:true, overdueBase:2, overdueDouble:true, overdueCap:20,
+            overdueDailyCap:20, overdueExcludeHabit:true, minPoints:0},
     settled:{},
     settleFrom:'',
     log:[],
@@ -1171,12 +1172,15 @@ function normalizePoints(){
   if(!Array.isArray(DB.points.log)) DB.points.log=[];
   if(!Array.isArray(DB.points.rewards) || !DB.points.rewards.length) DB.points.rewards=def.rewards;
   if(!Array.isArray(DB.points.redemptions)) DB.points.redemptions=[];
+  if(!Array.isArray(DB.points.settleLogs)) DB.points.settleLogs=[];
 }
 function settleStatusText(){
   const p=DB.points||{};
   const dates=Object.keys(p.settled||{}).sort();
   let t='结算状态：起始日 '+(p.settleFrom||'未设置')+'；已结算 '+dates.length+' 天'+(dates.length?('（最近 '+dates[dates.length-1]+'）'):'');
   if(p.lastSettle) t+='；上次结算 '+p.lastSettle.date+'，扣 '+p.lastSettle.deducted+' 分';
+  const n=(p.settleLogs||[]).length;
+  if(n) t+='；可撤销 '+n+' 次';
   return t;
 }
 function runSettleNow(){
@@ -1191,44 +1195,93 @@ function runSettleNow(){
 function settleOverduePoints(){
   normalizePoints();
   const cfg=DB.points.config;
-  if(cfg.overdueOn===false) return 0;        // 只有显式关闭才不结算
+  if(cfg.overdueOn===false) return 0;
   const p=DB.points;
   if(!p.settled) p.settled={};
   const today=todayStr();
-  if(!p.settleFrom) p.settleFrom=today;      // 从启用日算起，不追溯历史
+  if(!p.settleFrom) p.settleFrom=today;
   if(p.settleFrom>=today) return 0;
   let start=p.settleFrom;
-  if(daysBetween(start,today)>30){ const d=new Date(today+'T00:00:00'); d.setDate(d.getDate()-30); start=fmtDate(d); }
+  if(daysBetween(start,today)>60){ const d=new Date(today+'T00:00:00'); d.setDate(d.getDate()-60); start=fmtDate(d); }
   let deducted=0, changed=false;
+  const items=[];
   const cur=new Date(start+'T00:00:00');
   while(fmtDate(cur)<today){
     const ds=fmtDate(cur); cur.setDate(cur.getDate()+1);
     if(p.settled[ds]) continue;
     p.settled[ds]=true; changed=true;
-    if(DB.holidays.indexOf(ds)>=0) continue;          // 放假当天豁免
+    if(DB.holidays.indexOf(ds)>=0){ items.push({forDate:ds, overdueDays:0, missing:0, per:0, amount:0, note:'🏖 放假，跳过'}); continue; }
     const overdueDays=Math.max(1, daysBetween(ds,today));
-    let missing=0;
+    let missing=0, habitSkipped=0;
     buildDayTasks(ds).forEach(function(it){
-      if(it.backfill) return;                                                   // 补排的历史任务不计入逾期扣分
+      if(it.backfill) return;                                   // 补排的历史任务不计入
+      if(cfg.overdueExcludeHabit && it.category==='日常习惯'){ habitSkipped++; return; }
       const c=it.checkin;
-      const done=!!(c&&(c.status==='approved'||c.status==='pending_review'));   // 待审核也算已完成
+      const done=!!(c&&(c.status==='approved'||c.status==='pending_review'));
       if(!done) missing++;
     });
-    DB.homework.forEach(function(h){ if(hwDue(h)===ds && !h.completed) missing++; });   // 到期未完成的作业
-    if(!missing) continue;
+    DB.homework.forEach(function(h){ if(hwDue(h)===ds && !h.completed) missing++; });
+    if(!missing){ items.push({forDate:ds, overdueDays:overdueDays, missing:0, per:0, amount:0, note:'✅ 全部完成'+(habitSkipped?('（已忽略 '+habitSkipped+' 项日常习惯）'):'')}); continue; }
     let per=parseFloat(cfg.overdueBase)||0;
     if(cfg.overdueDouble) per=per*Math.pow(2, Math.max(0, overdueDays-1));
     const cap=parseFloat(cfg.overdueCap);
     if(!isNaN(cap)&&cap>0) per=Math.min(per,cap);
-    const amount=Math.round(per*missing);
-    if(amount>0){
-      const got=applyDeduction(amount, '逾期未完成 '+missing+' 项（'+cnMonthDay(ds)+'，逾期'+overdueDays+'天）');
-      deducted+=Math.abs(got);
-    }
+    let amount=Math.round(per*missing);
+    let cappedDaily=false;
+    const dcap=parseFloat(cfg.overdueDailyCap);
+    if(!isNaN(dcap)&&dcap>0&&amount>dcap){ amount=dcap; cappedDaily=true; }
+    let got=0;
+    if(amount>0) got=applyDeduction(amount, '逾期未完成 '+missing+' 项（'+cnMonthDay(ds)+'，逾期'+overdueDays+'天）');
+    if(got!==0) deducted+=Math.abs(got);
+    items.push({forDate:ds, overdueDays:overdueDays, missing:missing, per:Math.round(per), amount:amount,
+      actual:Math.abs(got), cappedDaily:cappedDaily, habitSkipped:habitSkipped,
+      note:(got===0?'积分已达下限，未实际扣分':(cappedDaily?'已按当天上限 '+amount+' 分':'')+(habitSkipped?('　忽略日常习惯 '+habitSkipped+' 项'):''))});
   }
-  DB.points.lastSettle={date:todayStr(), deducted:deducted, at:Date.now()};
+  const runRec={runId:uid(), at:Date.now(), date:today, from:start, total:deducted, count:items.filter(function(x){return x.missing>0;}).length, items:items};
+  p.settleLog=runRec;
+  p.settleLogs=(p.settleLogs||[]).concat([runRec]);
+  if(p.settleLogs.length>10) p.settleLogs=p.settleLogs.slice(-10);
+  p.lastSettle={date:today, deducted:deducted, at:Date.now()};
   if(changed) persist();
   return deducted;
+}
+function undoLastSettle(){
+  const logs=DB.points.settleLogs||[];
+  let lg=logs.length?logs[logs.length-1]:DB.points.settleLog;
+  if(!lg){ toast('没有可撤销的结算记录'); return; }
+  if(logs.length){
+    // 从栈里弹出该次结算（没有实际扣分也允许弹出，便于回溯）
+    DB.points.settleLogs=logs.slice(0,-1);
+    DB.points.settleLog=DB.points.settleLogs.length?DB.points.settleLogs[DB.points.settleLogs.length-1]:null;
+  }else{
+    DB.points.settleLog=null;
+  }
+  if(!lg.total){ persist(); renderParentCurrentTab(); toast('已撤销一条“未实际扣分”的结算记录'); return; }
+  addPoints(lg.total, '↩️ 撤销逾期结算（'+lg.date+'）');
+  (lg.items||[]).forEach(function(it){ if(it.forDate) delete DB.points.settled[it.forDate]; });
+  const back=lg.total;
+  DB.points.settleLog=null; DB.points.lastSettle={date:todayStr(), deducted:0, at:Date.now()};
+  persist(); renderParentCurrentTab();
+  toast('↩️ 已退回 '+back+' 分，可调整规则后重新结算');
+}
+function showSettleDetail(){
+  const lg=DB.points.settleLog;
+  if(!lg){
+    openModal('<h3>🔍 逾期结算明细</h3><p style="color:#555c7e">还没有结算记录。点「⚡ 立即结算逾期」后，这里会列出每一天的扣分明细。</p>'
+      +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button></div>');
+    return;
+  }
+  const rows=(lg.items||[]).map(function(it){
+    return '<tr><td>'+esc(it.forDate)+'</td><td>'+(it.overdueDays||'—')+'</td><td>'+(it.missing||0)+' 项</td>'
+      +'<td>'+(it.per?it.per+' 分':'—')+'</td><td style="font-weight:800;color:'+(it.actual?'#d64545':'var(--sub)')+'">'+(it.actual?('-'+it.actual):'0')+'</td>'
+      +'<td style="font-size:12px;color:var(--sub)">'+(it.note||'')+'</td></tr>';
+  }).join('');
+  openModal('<h3>🔍 逾期结算明细</h3>'
+    +'<p style="font-size:13px;color:#555c7e;line-height:1.7">结算日：'+esc(lg.date)+'　起始日：'+esc(lg.from)+'　合计扣分：<b style="color:#d64545">-'+lg.total+'</b> 分</p>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7">规则：基础 '+DB.points.config.overdueBase+' 分/项'+(DB.points.config.overdueDouble?'，每多逾期一天翻倍':'')+'，单项封顶 '+DB.points.config.overdueCap+' 分，当天封顶 '+DB.points.config.overdueDailyCap+' 分'+(DB.points.config.overdueExcludeHabit?'，不含日常习惯':'')+'。</p>'
+    +'<div style="max-height:50vh;overflow:auto"><table class="tbl"><thead><tr><th>日期</th><th>逾期天数</th><th>未完成</th><th>单项扣分</th><th>当天扣分</th><th>说明</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button>'
+    +'<button class="btn btn-danger" onclick="closeModal();undoLastSettle()">↩️ 撤销本次结算</button></div>', true);
 }
 
 /* ================= 审核 ================= */
@@ -2683,12 +2736,18 @@ function renderRewards(){
     +'<label class="check-item" style="width:fit-content"><input type="checkbox" id="cfgOverdue"'+(cfg.overdueOn?' checked':'')+' style="width:16px;height:16px"> 启用「逾期未完成扣分」</label>'
     +'<div class="form-grid" style="margin-top:10px">'
     +'<div class="form-row"><label>逾期第1天，每项未完成任务扣分</label><input id="cfgOverdueBase" type="number" min="0" value="'+cfg.overdueBase+'"></div>'
-    +'<div class="form-row"><label>单项单日扣分上限</label><input id="cfgOverdueCap" type="number" min="0" value="'+cfg.overdueCap+'"></div>'
+    +'<div class="form-row"><label>单项封顶（每项每天最多扣）</label><input id="cfgOverdueCap" type="number" min="0" value="'+cfg.overdueCap+'"></div>'
+    +'<div class="form-row"><label>当天封顶（一天最多扣多少，0=不限）</label><input id="cfgDailyCap" type="number" min="0" value="'+(cfg.overdueDailyCap==null?20:cfg.overdueDailyCap)+'"></div>'
     +'</div>'
+    +'<label class="check-item" style="width:fit-content;margin-top:6px"><input type="checkbox" id="cfgExcludeHabit"'+(cfg.overdueExcludeHabit?' checked':'')+' style="width:16px;height:16px"> 不扣「日常习惯」类任务（晨读、运动等）</label>'
     +'<label class="check-item" style="width:fit-content;margin-top:6px"><input type="checkbox" id="cfgDouble"'+(cfg.overdueDouble?' checked':'')+' style="width:16px;height:16px"> 每多逾期一天，扣分翻倍（2→4→8→16…）</label>'
     +'<div class="form-grid" style="margin-top:10px">'
     +'<div class="form-row"><label>逾期结算起始日（从这天开始结算）</label><input type="date" id="cfgSettleFrom" value="'+(cfg.settleFrom||todayStr())+'" style="width:100%"></div>'
-    +'<div class="form-row" style="display:flex;align-items:flex-end"><button class="btn btn-orange" onclick="runSettleNow()">⚡ 立即结算逾期</button></div>'
+    +'<div class="form-row" style="display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap">'
+    +'<button class="btn btn-orange" onclick="runSettleNow()">⚡ 立即结算逾期</button>'
+    +'<button class="btn btn-ghost" onclick="showSettleDetail()">🔍 查看明细</button>'
+    +'<button class="btn btn-danger" onclick="undoLastSettle()">↩️ 撤销上次结算</button>'
+    +'</div>'
     +'</div>'
     +'<div style="font-size:12.5px;color:var(--sub);line-height:1.7;background:#f6f8ff;border-radius:10px;padding:8px 10px">'+settleStatusText()+'</div>'
     +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7;margin-top:8px">结算规则：每天第一次打开工作台时，自动结算<b>昨天及更早</b>未完成的任务（已完成/待审核的不扣；🏖标记放假的当天不扣）；每个日期只结算一次。</p>'
@@ -2708,6 +2767,8 @@ function savePointsConfig(){
   const oc=document.getElementById('cfgOverdueCap'); if(oc) c.overdueCap=parseFloat(oc.value)||0;
   const od=document.getElementById('cfgDouble'); if(od) c.overdueDouble=od.checked;
   const sf=document.getElementById('cfgSettleFrom'); if(sf && sf.value) DB.points.settleFrom=sf.value;
+  const dcap=document.getElementById('cfgDailyCap'); if(dcap) c.overdueDailyCap=parseFloat(dcap.value)||0;
+  const eh=document.getElementById('cfgExcludeHabit'); if(eh) c.overdueExcludeHabit=eh.checked;
   if(!DB.points.settleFrom) DB.points.settleFrom=todayStr();   // 从今天开始结算，不追溯历史
   persist();
   toast(c.overdueOn?'✅ 已保存：逾期扣分已启用':'✅ 已保存：逾期扣分已关闭');
