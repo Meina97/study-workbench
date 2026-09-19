@@ -311,6 +311,29 @@ input[type="month"]{width:100%}
 .ledger-item .delta{font-weight:800;white-space:nowrap}
 .delta.plus{color:#1f8f60}
 .delta.minus{color:#d64545}
+.points-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.points-stat{background:#f7f9ff;border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.points-stat .lbl{font-size:12px;color:var(--sub);font-weight:700}
+.points-stat .num{font-size:22px;font-weight:900;margin-top:3px}
+.points-stat.income .num{color:#1f8f60}
+.points-stat.expense .num{color:#d64545}
+.points-stat.pending .num{color:var(--orange-deep)}
+.points-ledger-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.points-ledger-filter{padding:7px 12px;border-radius:11px;background:#f0f2fa;font-size:13px;font-weight:800;cursor:pointer}
+.points-ledger-filter.active{background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff}
+.points-ledger-scroll{max-height:570px;overflow:auto;border:1px solid var(--line);border-radius:14px}
+.points-ledger-table{margin:0}
+.points-ledger-table th{position:sticky;top:0;z-index:1}
+.points-ledger-reason{font-weight:700;color:#3a3f5c;line-height:1.45}
+.points-ledger-sub{font-size:11.5px;color:var(--sub);margin-top:3px}
+.points-ledger-delta{font-size:15px;font-weight:900;white-space:nowrap}
+.points-ledger-balance{font-weight:800;color:#555c7e;white-space:nowrap}
+.points-ledger-status{display:inline-block;padding:4px 8px;border-radius:9px;font-size:11.5px;font-weight:800;white-space:nowrap}
+.points-ledger-status.active{background:var(--red-soft);color:#d64545}
+.points-ledger-status.reversed{background:var(--mint-soft);color:#1f8f60}
+.points-ledger-status.posted{background:#eef1fa;color:#6b7392}
+.points-ledger-actions{display:flex;gap:6px;flex-wrap:wrap}
+@media (max-width:900px){.points-summary{grid-template-columns:1fr 1fr}}
 
 /* ===== 云端同步 ===== */
 .sync-status{font-size:13px;padding:8px 12px;border-radius:10px;margin-top:10px;font-weight:700}
@@ -440,7 +463,7 @@ const LS = {
 };
 const LS_OLD_MATERIALS='g3_materials';
 const SS_TIMER = 'g3_activeTimer';
-const APP_VER = '2026-09-11';   // 版本号（每次发布更新，用于核对设备上的版本）
+const APP_VER = '2026-09-19.1';   // 版本号（每次发布更新，用于核对设备上的版本）
 
 const CATS = ['日常习惯','语文','数学','英语','兴趣'];
 const TODAY_CATS = ['语文','数学','英语','兴趣','日常习惯'];
@@ -730,9 +753,40 @@ function buildDayTasks(dateStr){
 }
 
 /* ================= 积分 ================= */
-function totalPoints(){ return DB.points.log.reduce((s,l)=>s+l.delta,0); }
-function addPoints(delta, reason){
-  DB.points.log.push({id:uid(), date:todayStr(), delta, reason});
+function inferPointsType(l){
+  if(l && l.type) return l.type;
+  const reason=String((l&&l.reason)||'');
+  const delta=Number((l&&l.delta)||0);
+  if(/兑换奖励/.test(reason)) return 'redemption';
+  if(/返还逾期扣分|撤销逾期结算|恢复积分/.test(reason)) return 'reversal';
+  if(/逾期未完成/.test(reason) && delta<0) return 'overdue_deduction';
+  if(/驳回打卡扣回积分|撤销审核扣回积分/.test(reason)) return 'checkin_deduction';
+  if(/连续打卡奖励/.test(reason)) return 'streak_bonus';
+  if(/完成打卡/.test(reason)) return 'checkin_income';
+  return delta<0?'deduction':'income';
+}
+function addPoints(delta, reason, meta){
+  const entry=Object.assign({
+    id:uid(),
+    date:todayStr(),
+    createdAt:Date.now(),
+    delta:Number(delta)||0,
+    reason:String(reason||'')
+  }, meta||{});
+  entry.type=entry.type||inferPointsType(entry);
+  DB.points.log.push(entry);
+  return entry;
+}
+function totalPoints(){ return (DB.points.log||[]).reduce((s,l)=>s+(Number(l.delta)||0),0); }
+function pointsLogWithBalance(){
+  let balance=0;
+  return (DB.points.log||[]).slice().sort(function(a,b){
+    const dateCmp=String(a.date||'').localeCompare(String(b.date||''));
+    if(dateCmp) return dateCmp;
+    const atA=Number(a.createdAt)||0, atB=Number(b.createdAt)||0;
+    if(atA!==atB) return atA-atB;
+    return String(a.id||'').localeCompare(String(b.id||''));
+  }).map(function(l){ balance+=(Number(l.delta)||0); return {entry:l,balance:balance}; });
 }
 function hasApprovedDay(dateStr){ return DB.checkins.some(c=>c.date===dateStr && c.status==='approved'); }
 function computeStreak(){
@@ -749,7 +803,7 @@ function checkStreakBonus(){
     const blocks=Math.floor(s/cfg.streakDays);
     if(blocks>DB.streakMeta.awardedBlocks){
       const bonus=(blocks-DB.streakMeta.awardedBlocks)*cfg.streakBonus;
-      addPoints(bonus, '连续打卡奖励（连续'+s+'天）');
+      addPoints(bonus, '连续打卡奖励（连续'+s+'天）', {type:'streak_bonus',sourceType:'streak'});
       DB.streakMeta.awardedBlocks=blocks;
     }
   }
@@ -1103,7 +1157,7 @@ function retryCheckin(key, dateStr){
 function unapproveCheckin(id){
   const c=DB.checkins.find(x=>x.id===id); if(!c||c.status!=='approved') return;
   if(c.pointsAwarded){
-    DB.points.log.push({id:uid(), date:todayStr(), delta:-DB.points.config.perTask, reason:'撤销审核扣回积分：'+c.name});
+    addPoints(-DB.points.config.perTask, '撤销审核扣回积分：'+c.name, {type:'checkin_deduction',sourceType:'checkin',sourceId:c.id});
     c.pointsAwarded=false;
   }
   c.status='pending_review'; c.reviewedAt=null;
@@ -1150,14 +1204,14 @@ function minimizeTimerOverlay(){
 
 /* ================= 逾期未完成扣分 ================= */
 function daysBetween(a,b){ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000); }
-function applyDeduction(amount, reason){
+function applyDeduction(amount, reason, meta){
   if(!(amount>0)) return 0;
   const cfg=DB.points.config;
   const cur=totalPoints();
   let delta=-amount;
   const floor=parseFloat(cfg.minPoints);
   if(!isNaN(floor) && cur+delta<floor) delta=floor-cur;   // 最多扣到下限
-  if(delta!==0){ addPoints(delta, reason); return delta; }
+  if(delta!==0){ addPoints(delta, reason, Object.assign({type:'overdue_deduction'}, meta||{})); return delta; }
   return 0;
 }
 function normalizePoints(){
@@ -1170,6 +1224,14 @@ function normalizePoints(){
   if(!DB.points.settled || typeof DB.points.settled!=='object') DB.points.settled={};
   if(typeof DB.points.settleFrom!=='string') DB.points.settleFrom='';
   if(!Array.isArray(DB.points.log)) DB.points.log=[];
+  DB.points.log.forEach(function(l,i){
+    if(!l.id) l.id=uid();
+    if(!l.date) l.date=todayStr();
+    if(typeof l.delta!=='number') l.delta=Number(l.delta)||0;
+    if(typeof l.createdAt!=='number') l.createdAt=(Date.parse(String(l.date)+'T12:00:00')||Date.now())+i;
+    if(!l.type) l.type=inferPointsType(l);
+    if(l.refunded && !l.reversedAt) l.reversedAt=l.createdAt;
+  });
   if(!Array.isArray(DB.points.rewards) || !DB.points.rewards.length) DB.points.rewards=def.rewards;
   if(!Array.isArray(DB.points.redemptions)) DB.points.redemptions=[];
   if(!Array.isArray(DB.points.settleLogs)) DB.points.settleLogs=[];
@@ -1205,6 +1267,7 @@ function settleOverduePoints(){
   if(daysBetween(start,today)>60){ const d=new Date(today+'T00:00:00'); d.setDate(d.getDate()-60); start=fmtDate(d); }
   let deducted=0, changed=false;
   const items=[];
+  const runId=uid();
   const cur=new Date(start+'T00:00:00');
   while(fmtDate(cur)<today){
     const ds=fmtDate(cur); cur.setDate(cur.getDate()+1);
@@ -1231,13 +1294,13 @@ function settleOverduePoints(){
     const dcap=parseFloat(cfg.overdueDailyCap);
     if(!isNaN(dcap)&&dcap>0&&amount>dcap){ amount=dcap; cappedDaily=true; }
     let got=0;
-    if(amount>0) got=applyDeduction(amount, '逾期未完成 '+missing+' 项（'+cnMonthDay(ds)+'，逾期'+overdueDays+'天）');
+    if(amount>0) got=applyDeduction(amount, '逾期未完成 '+missing+' 项（'+cnMonthDay(ds)+'，逾期'+overdueDays+'天）', {type:'overdue_deduction', sourceType:'settle', sourceId:runId, forDate:ds, overdueDays:overdueDays, missing:missing});
     if(got!==0) deducted+=Math.abs(got);
     items.push({forDate:ds, overdueDays:overdueDays, missing:missing, per:Math.round(per), amount:amount,
       actual:Math.abs(got), cappedDaily:cappedDaily, habitSkipped:habitSkipped,
       note:(got===0?'积分已达下限，未实际扣分':(cappedDaily?'已按当天上限 '+amount+' 分':'')+(habitSkipped?('　忽略日常习惯 '+habitSkipped+' 项'):''))});
   }
-  const runRec={runId:uid(), at:Date.now(), date:today, from:start, total:deducted, count:items.filter(function(x){return x.missing>0;}).length, items:items};
+  const runRec={runId:runId, at:Date.now(), date:today, from:start, total:deducted, count:items.filter(function(x){return x.missing>0;}).length, items:items};
   p.settleLog=runRec;
   p.settleLogs=(p.settleLogs||[]).concat([runRec]);
   if(p.settleLogs.length>10) p.settleLogs=p.settleLogs.slice(-10);
@@ -1245,33 +1308,124 @@ function settleOverduePoints(){
   if(changed) persist();
   return deducted;
 }
+function pointsEntryType(l){ return (l&&l.type)||inferPointsType(l||{}); }
+function pointsEntryTypeLabel(l){
+  const t=pointsEntryType(l);
+  if(t==='overdue_deduction') return '逾期扣分';
+  if(t==='manual_debit') return '手动扣分';
+  if(t==='manual_credit') return '手动加/补分';
+  if(t==='checkin_income') return '打卡得分';
+  if(t==='checkin_deduction') return '审核扣回';
+  if(t==='streak_bonus') return '连续奖励';
+  if(t==='redemption') return '奖励兑换';
+  if(t==='reversal') return '反向恢复';
+  return (Number(l&&l.delta)<0)?'其他扣分':'其他入账';
+}
+function pointsEntryStatus(l){
+  if(l.reversedAt || l.refunded) return {label:'已恢复',cls:'reversed'};
+  if(pointsEntryType(l)==='reversal') return {label:'恢复入账',cls:'reversed'};
+  if(pointsEntryType(l)==='redemption') return {label:'已兑换',cls:'posted'};
+  if(Number(l.delta)<0) return {label:'可恢复',cls:'active'};
+  return {label:'已入账',cls:'posted'};
+}
+function canRestorePointsEntry(l){
+  return !!l && Number(l.delta)<0 && !l.reversedAt && !l.refunded && pointsEntryType(l)!=='reversal';
+}
+function markPointsEntryReversed(l, reversalId, note){
+  if(!l) return;
+  l.reversedAt=Date.now();
+  l.reversalId=reversalId||'';
+  l.reverseNote=note||'';
+}
+function findRedemptionForLog(l){
+  if(!l) return null;
+  const list=DB.points.redemptions||[];
+  if(l.sourceType==='redemption' && l.sourceId){
+    const exact=list.find(function(r){ return r.id===l.sourceId; });
+    if(exact) return exact;
+  }
+  if(l.redemptionId){
+    const exact=list.find(function(r){ return r.id===l.redemptionId; });
+    if(exact) return exact;
+  }
+  const reason=String(l.reason||'');
+  return list.slice().reverse().find(function(r){ return reason.indexOf(String(r.rewardName||''))>=0 && Number(r.cost)===Math.abs(Number(l.delta)||0); })||null;
+}
+function requestRestorePointsEntry(id){
+  const l=(DB.points.log||[]).find(function(x){ return x.id===id; });
+  if(!l){ toast('没有找到这条积分记录'); return; }
+  if(!canRestorePointsEntry(l)){ toast(l.reversedAt||l.refunded?'这条记录已经恢复过':'这条记录不能直接恢复'); return; }
+  const amount=Math.abs(Number(l.delta)||0);
+  const isRedemption=pointsEntryType(l)==='redemption';
+  const after=totalPoints()+amount;
+  openModal('<h3>'+(isRedemption?'↩️ 撤销兑换':'↩️ 恢复单条积分')+'</h3>'
+    +'<p style="font-size:15px;color:#555c7e;line-height:1.8">将处理这条记录：<br><b>'+esc(l.reason||'未填写原因')+'</b></p>'
+    +'<p style="font-size:13px;color:var(--sub);line-height:1.8">变动：<b style="color:#d64545">'+(Number(l.delta)<0?'-':'+')+amount+' 分</b>　恢复后当前积分：<b>'+after+' 分</b><br>系统不会删除原始记录，而是新增一条同金额的反向流水，方便以后核对。'+(isRedemption?'<br>奖励兑换记录也会同时撤销。':'')+'</p>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
+    +'<button class="btn btn-mint" onclick="doRestorePointsEntry(\''+id+'\')">'+(isRedemption?'确认撤销并返还 '+amount+' 分':'确认恢复 '+amount+' 分')+'</button></div>');
+}
+function doRestorePointsEntry(id){
+  const l=(DB.points.log||[]).find(function(x){ return x.id===id; });
+  if(!l||!canRestorePointsEntry(l)){ closeModal(); toast('这条记录已处理或不能恢复'); return; }
+  const amount=Math.abs(Number(l.delta)||0);
+  const isRedemption=pointsEntryType(l)==='redemption';
+  const rev=addPoints(amount, '恢复积分：'+(l.reason||'未填写原因'), {
+    type:'reversal', sourceType:'entry_restore', reversesId:l.id, originalType:pointsEntryType(l)
+  });
+  markPointsEntryReversed(l, rev.id, isRedemption?'撤销兑换并返还积分':'家长逐条恢复');
+  if(isRedemption){
+    const r=findRedemptionForLog(l);
+    if(r) DB.points.redemptions=(DB.points.redemptions||[]).filter(function(x){ return x.id!==r.id; });
+  }
+  persist(); closeModal(); renderParentCurrentTab();
+  toast((isRedemption?'↩️ 已撤销兑换并返还 ':'↩️ 已恢复 ')+amount+' 分');
+}
+function restoreRedemptionRecord(id){
+  const r=(DB.points.redemptions||[]).find(function(x){ return x.id===id; });
+  if(!r){ toast('没有找到兑换记录'); return; }
+  const log=(DB.points.log||[]).find(function(l){
+    return (l.sourceType==='redemption'&&l.sourceId===r.id) || l.redemptionId===r.id ||
+      (pointsEntryType(l)==='redemption' && !l.reversedAt && !l.refunded && String(l.reason||'').indexOf(String(r.rewardName||''))>=0 && Math.abs(Number(l.delta)||0)===Number(r.cost));
+  });
+  if(log){ requestRestorePointsEntry(log.id); return; }
+  openModal('<h3>↩️ 撤销兑换</h3><p style="font-size:14px;color:#555c7e;line-height:1.8">没有找到与「'+esc(r.rewardName)+'」对应的积分扣分流水。是否仍然撤销兑换记录，并返还 <b>'+r.cost+' 分</b>？</p>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button><button class="btn btn-mint" onclick="doRestoreRedemptionNoLog(\''+r.id+'\')">确认撤销并返还</button></div>');
+}
+function doRestoreRedemptionNoLog(id){
+  const r=(DB.points.redemptions||[]).find(function(x){ return x.id===id; });
+  if(!r){ closeModal(); return; }
+  addPoints(Number(r.cost)||0, '恢复积分：兑换奖励：'+r.rewardName, {type:'reversal', sourceType:'redemption_restore', sourceId:r.id});
+  DB.points.redemptions=(DB.points.redemptions||[]).filter(function(x){ return x.id!==r.id; });
+  persist(); closeModal(); renderParentCurrentTab();
+  toast('↩️ 已撤销兑换并返还 '+r.cost+' 分');
+}
 function overdueDeductLogs(){
-  return (DB.points.log||[]).filter(function(l){ return l.delta<0 && /逾期未完成/.test(l.reason) && !l.refunded; });
+  return (DB.points.log||[]).filter(function(l){ return canRestorePointsEntry(l) && pointsEntryType(l)==='overdue_deduction'; });
 }
 function refundOverdueDeductions(){
   const logs=overdueDeductLogs();
-  if(!logs.length){ toast('没有找到可返还的「逾期未完成」扣分记录（可能已返还过）'); return; }
-  const total=logs.reduce(function(a,l){ return a+Math.abs(l.delta); },0);
-  openModal('<h3>↩️ 返还逾期扣分</h3>'
-    +'<p style="font-size:15px;color:#555c7e;line-height:1.8">找到 <b>'+logs.length+'</b> 条「逾期未完成」扣分记录，合计 <b style="color:#d64545">-'+total+'</b> 分。</p>'
-    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.8">返还后：<br>① 立即加回 '+total+' 分（积分明细里会有一条“返还逾期扣分”）<br>② 清除“已结算”标记，之后你可以用新规则（每天封顶）重新结算</p>'
+  if(!logs.length){ toast('没有找到可恢复的「逾期未完成」扣分记录（可能已逐条恢复过）'); return; }
+  const total=logs.reduce(function(a,l){ return a+Math.abs(Number(l.delta)||0); },0);
+  openModal('<h3>↩️ 批量恢复逾期扣分</h3>'
+    +'<p style="font-size:15px;color:#555c7e;line-height:1.8">找到 <b>'+logs.length+'</b> 条尚未恢复的「逾期未完成」扣分，合计 <b style="color:#d64545">-'+total+'</b> 分。</p>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.8">每条原记录都会标记为“已恢复”，并新增一笔反向流水。<br>如只想处理某一天，请关闭本窗口，在台账中点击对应记录右侧的「恢复此条」。</p>'
     +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
-    +'<button class="btn btn-primary" onclick="doRefundOverdue()">确认返还 '+total+' 分</button></div>');
+    +'<button class="btn btn-primary" onclick="doRefundOverdue()">确认全部恢复 '+total+' 分</button></div>');
 }
 function doRefundOverdue(){
   const logs=overdueDeductLogs();
-  if(!logs.length){ closeModal(); toast('没有可返还的记录'); return; }
-  const total=logs.reduce(function(a,l){ return a+Math.abs(l.delta); },0);
-  logs.forEach(function(l){ l.refunded=true; });
-  addPoints(total, '↩️ 返还逾期扣分（'+logs.length+' 条，误扣修正）');
+  if(!logs.length){ closeModal(); toast('没有可恢复的记录'); return; }
+  const total=logs.reduce(function(a,l){ return a+Math.abs(Number(l.delta)||0); },0);
+  const rev=addPoints(total, '↩️ 返还逾期扣分（批量恢复 '+logs.length+' 条，误扣修正）', {type:'reversal', sourceType:'bulk_refund', reversesIds:logs.map(function(l){return l.id;})});
+  logs.forEach(function(l){ markPointsEntryReversed(l, rev.id, '批量恢复逾期扣分'); });
   DB.points.settled={};                 // 清空已结算标记，便于按新规则重新结算
   DB.points.settleLog=null; DB.points.settleLogs=[];
   persist(); closeModal(); renderParentCurrentTab();
-  toast('↩️ 已返还 '+total+' 分');
+  toast('↩️ 已批量恢复 '+total+' 分，原记录已标记');
 }
 function manualAdjustPoints(){
   openModal('<h3>➕ 手动补分 / 扣分</h3>'
-    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7">用于纠正误扣/漏加（例如返还之前多扣的积分）。会记录到积分明细，孩子端可见。</p>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7">用于纠正误扣/漏加。每笔操作都会进入积分台账；如果是扣分，之后可从台账里单独恢复。</p>'
     +'<div class="form-row"><label>分数（正数＝加分，负数＝扣分）</label><input id="adjPts" type="number" value="10"></div>'
     +'<div class="form-row"><label>原因</label><input id="adjReason" placeholder="如：返还误扣积分"></div>'
     +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
@@ -1281,7 +1435,8 @@ function doManualAdjust(){
   const v=parseFloat(document.getElementById('adjPts').value);
   if(!v){ toast('请输入非 0 的分数'); return; }
   const r=document.getElementById('adjReason').value.trim()||'手动调整';
-  addPoints(v, r); persist(); closeModal(); renderParentCurrentTab();
+  addPoints(v, r, {type:v>0?'manual_credit':'manual_debit', sourceType:'manual'});
+  persist(); closeModal(); renderParentCurrentTab();
   toast((v>0?'➕ 已加 ':'➖ 已扣 ')+Math.abs(v)+' 分');
 }
 function undoLastSettle(){
@@ -1296,7 +1451,13 @@ function undoLastSettle(){
     DB.points.settleLog=null;
   }
   if(!lg.total){ persist(); renderParentCurrentTab(); toast('已撤销一条“未实际扣分”的结算记录'); return; }
-  addPoints(lg.total, '↩️ 撤销逾期结算（'+lg.date+'）');
+  const rev=addPoints(lg.total, '↩️ 撤销逾期结算（'+lg.date+'）', {type:'reversal', sourceType:'settle_undo', reversesRunId:lg.runId||''});
+  const linked=(DB.points.log||[]).filter(function(l){
+    if(!canRestorePointsEntry(l)||pointsEntryType(l)!=='overdue_deduction') return false;
+    if(lg.runId && l.sourceId===lg.runId) return true;
+    return l.date===lg.date && (lg.items||[]).some(function(it){ return it.actual===Math.abs(Number(l.delta)||0) && String(l.reason||'').indexOf(cnMonthDay(it.forDate))>=0; });
+  });
+  linked.forEach(function(l){ markPointsEntryReversed(l, rev.id, '撤销本次逾期结算'); });
   (lg.items||[]).forEach(function(it){ if(it.forDate) delete DB.points.settled[it.forDate]; });
   const back=lg.total;
   DB.points.settleLog=null; DB.points.lastSettle={date:todayStr(), deducted:0, at:Date.now()};
@@ -1329,7 +1490,7 @@ function approveCheckin(id, accuracy){
   c.status='approved'; c.reviewedAt=Date.now();
   if(accuracy!=='' && accuracy!=null && !isNaN(parseFloat(accuracy))) c.accuracy=parseFloat(accuracy);
   if(!c.pointsAwarded){
-    addPoints(DB.points.config.perTask, '完成打卡：'+c.name+'（'+cnMonthDay(c.date)+'）');
+    addPoints(DB.points.config.perTask, '完成打卡：'+c.name+'（'+cnMonthDay(c.date)+'）', {type:'checkin_income',sourceType:'checkin',sourceId:c.id});
     c.pointsAwarded=true;
   }
   checkStreakBonus();
@@ -1338,7 +1499,7 @@ function approveCheckin(id, accuracy){
 function rejectCheckin(id){
   const c=DB.checkins.find(x=>x.id===id); if(!c) return;
   c.status='rejected'; c.reviewedAt=Date.now();
-  if(c.pointsAwarded){ DB.points.log.push({id:uid(), date:todayStr(), delta:-DB.points.config.perTask, reason:'驳回打卡扣回积分：'+c.name}); c.pointsAwarded=false; }
+  if(c.pointsAwarded){ addPoints(-DB.points.config.perTask, '驳回打卡扣回积分：'+c.name, {type:'checkin_deduction',sourceType:'checkin',sourceId:c.id}); c.pointsAwarded=false; }
   if(c.key && c.key.indexOf('hw:')===0){
     const h=DB.homework.find(x=>x.id===c.key.slice(3)); if(h){ h.completed=false; h.late=false; h.completedDate=null; }
   }
@@ -1608,8 +1769,10 @@ function redeemReward(id){
 function doRedeem(id){
   const r=DB.points.rewards.find(x=>x.id===id); if(!r) return;
   if(totalPoints()<r.cost){ closeModal(); toast('积分不足'); return; }
-  DB.points.redemptions.push({id:uid(), date:todayStr(), rewardId:id, rewardName:r.name, icon:r.icon, cost:r.cost});
-  DB.points.log.push({id:uid(), date:todayStr(), delta:-r.cost, reason:'兑换奖励：'+r.name});
+  const redemption={id:uid(), date:todayStr(), rewardId:id, rewardName:r.name, icon:r.icon, cost:r.cost};
+  DB.points.redemptions.push(redemption);
+  const redemptionLog=addPoints(-r.cost, '兑换奖励：'+r.name, {type:'redemption',sourceType:'redemption',sourceId:redemption.id,redemptionId:redemption.id});
+  redemption.pointsLogId=redemptionLog.id;
   persist(); closeModal(); toast('🎉 兑换成功！');
   renderCurrentView();
 }
@@ -1625,8 +1788,10 @@ function renderShop(){
       +'<div class="cost">🌟 '+r.cost+' 积分</div>'
       +'<button class="btn '+(can?'btn-orange':'btn-ghost')+' btn-sm" '+(can?'':'disabled')+' onclick="redeemReward(\''+r.id+'\')">'+(can?'兑换':('还差 '+(r.cost-pts)+' 分'))+'</button></div>';
   }).join('')||'<div class="empty"><div class="big">🎈</div>暂无可用奖励</div>';
-  const ledger=DB.points.log.slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.id).localeCompare(String(a.id))).slice(0,30).map(l=>{
-    return '<div class="ledger-item"><div><b>'+cnMonthDay(l.date)+'</b><span class="why">'+esc(l.reason)+'</span></div>'
+  const ledger=pointsLogWithBalance().slice(-30).reverse().map(function(x){
+    const l=x.entry, st=pointsEntryStatus(l);
+    return '<div class="ledger-item"><div><b>'+cnMonthDay(l.date)+'</b><span class="why">'+esc(l.reason)+'</span>'
+      +'<div style="font-size:11.5px;color:var(--sub);margin-top:3px">'+esc(pointsEntryTypeLabel(l))+' · '+esc(st.label)+' · 结余 '+x.balance+' 分</div></div>'
       +'<span class="delta '+(l.delta>=0?'plus':'minus')+'">'+(l.delta>=0?'+':'')+l.delta+'</span></div>';
   }).join('')||'<div class="empty" style="padding:16px">还没有积分记录，完成打卡就有积分啦！</div>';
   const hist=DB.points.redemptions.slice().reverse().map(x=>'<tr><td>'+cnMonthDay(x.date)+'</td><td>'+x.icon+' '+esc(x.rewardName)+'</td><td>'+x.cost+'</td></tr>').join('')||'<tr><td colspan="3" style="text-align:center;color:var(--sub)">还没有兑换记录</td></tr>';
@@ -2755,6 +2920,85 @@ function renderReview(){
 }
 
 /* ================= 积分奖励（家长） ================= */
+let pointsLedgerFilter='all';
+function setPointsLedgerFilter(f){ pointsLedgerFilter=f; renderParentCurrentTab(); }
+function pointsLedgerMatches(l){
+  const t=pointsEntryType(l);
+  if(pointsLedgerFilter==='overdue') return t==='overdue_deduction';
+  if(pointsLedgerFilter==='manual') return t==='manual_debit'||t==='manual_credit';
+  if(pointsLedgerFilter==='redemption') return t==='redemption';
+  if(pointsLedgerFilter==='reversal') return t==='reversal';
+  if(pointsLedgerFilter==='checkin') return t==='checkin_income'||t==='checkin_deduction'||t==='streak_bonus';
+  return true;
+}
+function pointsLedgerPanelHtml(){
+  const all=DB.points.log||[];
+  const income=all.filter(function(l){return Number(l.delta)>0;}).reduce(function(a,l){return a+(Number(l.delta)||0);},0);
+  const expense=all.filter(function(l){return Number(l.delta)<0;}).reduce(function(a,l){return a+Math.abs(Number(l.delta)||0);},0);
+  const restorable=all.filter(canRestorePointsEntry);
+  const restorableTotal=restorable.reduce(function(a,l){return a+Math.abs(Number(l.delta)||0);},0);
+  const filterDefs=[
+    ['all','全部'],['overdue','逾期扣分'],['manual','手动调整'],['redemption','奖励兑换'],['reversal','恢复记录'],['checkin','打卡积分']
+  ];
+  const tools=filterDefs.map(function(f){
+    return '<button class="points-ledger-filter'+(pointsLedgerFilter===f[0]?' active':'')+'" onclick="setPointsLedgerFilter(\''+f[0]+'\')">'+f[1]+'</button>';
+  }).join('');
+  const balances=pointsLogWithBalance();
+  const balanceMap={}; balances.forEach(function(x){ balanceMap[x.entry.id]=x.balance; });
+  const rows=balances.slice().reverse().filter(function(x){return pointsLedgerMatches(x.entry);}).map(function(x){
+    const l=x.entry, st=pointsEntryStatus(l), type=pointsEntryTypeLabel(l);
+    const date=esc(l.date||''), time=l.createdAt?new Date(l.createdAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+    let action='<span class="points-ledger-status '+st.cls+'">'+st.label+'</span>';
+    if(canRestorePointsEntry(l)){
+      action='<button class="btn btn-mint btn-sm" onclick="requestRestorePointsEntry(\''+l.id+'\')">'+(pointsEntryType(l)==='redemption'?'撤销并返还':'恢复此条')+'</button>';
+    }
+    let sub=type;
+    if(l.reversedAt) sub+=' · 恢复于 '+new Date(l.reversedAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    else if(l.reversesId) sub+=' · 对应原记录 '+esc(String(l.reversesId).slice(-8));
+    else if(l.reversesRunId) sub+=' · 撤销整次结算';
+    else if(l.reversesIds&&l.reversesIds.length) sub+=' · 共恢复 '+l.reversesIds.length+' 条';
+    return '<tr>'
+      +'<td style="white-space:nowrap;font-weight:800">'+date+'<div class="points-ledger-sub">'+time+'</div></td>'
+      +'<td><div class="points-ledger-reason">'+esc(l.reason||'未填写原因')+'</div><div class="points-ledger-sub">'+esc(sub)+'</div></td>'
+      +'<td class="points-ledger-delta" style="color:'+(Number(l.delta)>=0?'#1f8f60':'#d64545')+'">'+(Number(l.delta)>=0?'+':'')+Number(l.delta)+'</td>'
+      +'<td class="points-ledger-balance">'+(balanceMap[l.id]||0)+'</td>'
+      +'<td><div class="points-ledger-actions">'+action+'</div></td></tr>';
+  }).join('')||'<tr><td colspan="5" class="empty">当前筛选条件下没有积分记录</td></tr>';
+  return '<div class="panel">'
+    +'<div class="parent-tab-head" style="margin-bottom:12px"><h4 style="margin:0">🧾 积分台账</h4><span class="badge bg-gray">共 '+all.length+' 笔</span></div>'
+    +'<div class="points-summary">'
+      +'<div class="points-stat"><div class="lbl">当前积分</div><div class="num">'+totalPoints()+'</div></div>'
+      +'<div class="points-stat income"><div class="lbl">累计增加</div><div class="num">+'+income+'</div></div>'
+      +'<div class="points-stat expense"><div class="lbl">累计扣减</div><div class="num">-'+expense+'</div></div>'
+      +'<div class="points-stat pending"><div class="lbl">尚可恢复扣分</div><div class="num">-'+restorableTotal+'</div><div class="points-ledger-sub">'+restorable.length+' 条，可逐条处理</div></div>'
+    +'</div>'
+    +'<div class="points-ledger-tools">'+tools
+      +'<button class="btn btn-ghost btn-sm" onclick="exportPointsLedgerCSV()">⬇️ 导出CSV</button>'
+      +'<button class="btn btn-mint btn-sm" onclick="refundOverdueDeductions()">批量恢复逾期扣分</button>'
+    +'</div>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7;margin-bottom:10px">核对规则：当前积分 = 累计增加 − 累计扣减。点「恢复此条」不会删除原记录，而是新增一笔反向流水，并把原记录标为“已恢复”，可反复追溯。</p>'
+    +'<div class="points-ledger-scroll"><table class="tbl points-ledger-table"><thead><tr><th>日期</th><th>事项</th><th>变动</th><th>结余</th><th>状态 / 操作</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+    +'</div>';
+}
+function csvCell(v){ return '"'+String(v==null?'':v).replace(/"/g,'""')+'"'; }
+function exportPointsLedgerCSV(){
+  normalizePoints();
+  const balances=pointsLogWithBalance();
+  const balanceMap={}; balances.forEach(function(x){ balanceMap[x.entry.id]=x.balance; });
+  const rows=[['日期','时间','类型','事项','变动','结余','状态','恢复时间']];
+  balances.slice().reverse().forEach(function(x){
+    const l=x.entry, st=pointsEntryStatus(l);
+    rows.push([l.date, l.createdAt?new Date(l.createdAt).toLocaleTimeString('zh-CN'):'', pointsEntryTypeLabel(l), l.reason||'', Number(l.delta)||0, balanceMap[l.id]||0, st.label, l.reversedAt?new Date(l.reversedAt).toLocaleString('zh-CN'):'']);
+  });
+  const csv='\ufeff'+rows.map(function(r){return r.map(csvCell).join(',');}).join('\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='积分台账_'+todayStr()+'.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('📤 已导出积分台账');
+}
 function renderRewards(){
   const cfg=DB.points.config;
   const rw=DB.points.rewards.map(r=>'<tr>'
@@ -2762,8 +3006,9 @@ function renderRewards(){
     +'<td><button class="btn '+(r.enabled?'btn-mint':'btn-ghost')+' btn-sm" onclick="toggleReward(\''+r.id+'\')">'+(r.enabled?'✅ 启用':'⏸ 停用')+'</button></td>'
     +'<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick="editReward(\''+r.id+'\')">编辑</button> '
     +'<button class="btn btn-danger btn-sm" onclick="deleteReward(\''+r.id+'\')">删除</button></td></tr>').join('')||'<tr><td colspan="5" class="empty">暂无奖励项目</td></tr>';
-  const red=DB.points.redemptions.slice().reverse().map(x=>'<tr><td>'+cnMonthDay(x.date)+'</td><td>'+x.icon+' '+esc(x.rewardName)+'</td><td>'+x.cost+' 分</td><td><button class="btn btn-danger btn-sm" onclick="deleteRedemption(\''+x.id+'\')">删除记录</button></td></tr>').join('')||'<tr><td colspan="4" class="empty">暂无兑换记录</td></tr>';
-  const html='<div class="parent-tab-head"><h2>⭐ 积分与奖励</h2><button class="btn btn-primary" onclick="editReward(null)">＋ 添加奖励</button></div>'
+  const red=DB.points.redemptions.slice().reverse().map(x=>'<tr><td>'+cnMonthDay(x.date)+'</td><td>'+x.icon+' '+esc(x.rewardName)+'</td><td>'+x.cost+' 分</td><td><button class="btn btn-ghost btn-sm" onclick="restoreRedemptionRecord(\''+x.id+'\')">↩️ 撤销并返还</button></td></tr>').join('')||'<tr><td colspan="4" class="empty">暂无兑换记录</td></tr>';
+  const html='<div class="parent-tab-head"><h2>⭐ 积分与奖励</h2><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-ghost" onclick="manualAdjustPoints()">➕ 手动补分/扣分</button><button class="btn btn-primary" onclick="editReward(null)">＋ 添加奖励</button></div></div>'
+    +pointsLedgerPanelHtml()
     +'<div class="panel"><h4>⚙️ 积分规则</h4>'
     +'<div class="form-grid">'
     +'<div class="form-row"><label>单任务积分（默认10分）</label><input id="cfgPer" type="number" min="1" value="'+cfg.perTask+'"></div>'
@@ -2786,8 +3031,6 @@ function renderRewards(){
     +'<button class="btn btn-orange" onclick="runSettleNow()">⚡ 立即结算逾期</button>'
     +'<button class="btn btn-ghost" onclick="showSettleDetail()">🔍 查看明细</button>'
     +'<button class="btn btn-danger" onclick="undoLastSettle()">↩️ 撤销上次结算</button>'
-    +'<button class="btn btn-mint" onclick="refundOverdueDeductions()">↩️ 返还逾期扣分</button>'
-    +'<button class="btn btn-ghost" onclick="manualAdjustPoints()">➕ 手动补分/扣分</button>'
     +'</div>'
     +'</div>'
     +'<div style="font-size:12.5px;color:var(--sub);line-height:1.7;background:#f6f8ff;border-radius:10px;padding:8px 10px">'+settleStatusText()+'</div>'
@@ -2834,7 +3077,7 @@ function saveReward(id){
   persist(); closeModal(); renderParentCurrentTab(); toast('✅ 已保存');
 }
 function deleteRedemption(id){
-  DB.points.redemptions=DB.points.redemptions.filter(x=>x.id!==id); persist(); renderParentCurrentTab();
+  restoreRedemptionRecord(id);
 }
 
 /* ================= 作息管理（家长） ================= */
