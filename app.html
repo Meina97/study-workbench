@@ -463,7 +463,7 @@ const LS = {
 };
 const LS_OLD_MATERIALS='g3_materials';
 const SS_TIMER = 'g3_activeTimer';
-const APP_VER = '2026-09-19.1';   // 版本号（每次发布更新，用于核对设备上的版本）
+const APP_VER = '2026-10-09.1';   // 版本号（每次发布更新，用于核对设备上的版本）
 
 const CATS = ['日常习惯','语文','数学','英语','兴趣'];
 const TODAY_CATS = ['语文','数学','英语','兴趣','日常习惯'];
@@ -637,9 +637,12 @@ function loadAll(){
     if(typeof a.timeText!=='string') a.timeText='';
   });
   if(!Array.isArray(DB.skips)) DB.skips=[];
+  normalizeCheckinRecords();
+  normalizeHomeworkRecords();
   normalizePoints();   // 补齐积分配置（含逾期扣分字段）
+  loadSyncDirty();
 }
-function persist(){
+function persistLocal(){
   localStorage.setItem(LS.userInfo, JSON.stringify(DB.userInfo));
   localStorage.setItem(LS.settings, JSON.stringify(DB.settings));
   localStorage.setItem(LS.studyAids, JSON.stringify(DB.studyAids));
@@ -655,6 +658,9 @@ function persist(){
   localStorage.setItem(LS.streakMeta, JSON.stringify(DB.streakMeta));
   localStorage.setItem(LS.customLibrary, JSON.stringify(DB.customLibrary));
   localStorage.removeItem(LS_OLD_MATERIALS);
+}
+function persist(){
+  persistLocal();
   scheduleCloudPush();
 }
 
@@ -702,12 +708,84 @@ function taskAppears(task, dateStr){
     default: return true;
   }
 }
-function getCheckin(dateStr, key){ return DB.checkins.find(c=>c.date===dateStr && c.key===key)||null; }
+function getCheckin(dateStr, key){
+  const arr=DB.checkins.filter(c=>c.date===dateStr && c.key===key);
+  if(!arr.length) return null;
+  return arr.slice().sort(function(a,b){
+    const rank=checkinStatusRank(b)-checkinStatusRank(a);
+    if(rank) return rank;
+    return recordFreshness(b)-recordFreshness(a);
+  })[0];
+}
 // 按 key 查最近一次打卡（作业可能跨天完成，只按 key 找）
 function getCheckinByKey(key){
   const arr=DB.checkins.filter(c=>c.key===key);
   if(!arr.length) return null;
-  return arr.slice().sort((a,b)=>((b.completedAt||b.createdAt||0)-(a.completedAt||a.createdAt||0)))[0];
+  return arr.slice().sort(function(a,b){
+    const rank=checkinStatusRank(b)-checkinStatusRank(a);
+    if(rank) return rank;
+    return recordFreshness(b)-recordFreshness(a);
+  })[0];
+}
+
+function recordFreshness(r){
+  if(!r) return 0;
+  return Number(r.updatedAt||r.reviewedAt||r.completedAt||r.createdAt||0)||0;
+}
+function checkinMergeKey(c){
+  return 'id:'+((c&&c.id)||'');
+}
+function checkinStatusRank(c){
+  const ranks={todo:0,in_progress:1,pending_review:2,rejected:3,approved:4};
+  return ranks[(c&&c.status)||'todo']==null?0:ranks[(c&&c.status)||'todo'];
+}
+function newerCheckin(a,b){
+  if(!a) return b;
+  if(!b) return a;
+  const ta=recordFreshness(a), tb=recordFreshness(b);
+  if(ta!==tb) return ta>tb?a:b;
+  return checkinStatusRank(a)>=checkinStatusRank(b)?a:b;
+}
+function mergeCheckinLists(listA, listB){
+  const map={};
+  [].concat(listA||[], listB||[]).forEach(function(c,i){
+    if(!c || typeof c!=='object') return;
+    if(!c.id) c.id=uid();
+    if(!c.updatedAt) c.updatedAt=recordFreshness(c)||(Date.now()+i);
+    const key=checkinMergeKey(c)||('id:'+c.id);
+    map[key]=newerCheckin(map[key],c);
+  });
+  return Object.keys(map).map(function(k){return map[k];}).sort(function(a,b){
+    return String(a.date||'').localeCompare(String(b.date||'')) || (recordFreshness(a)-recordFreshness(b));
+  });
+}
+function normalizeCheckinRecords(){
+  if(!Array.isArray(DB.checkins)) DB.checkins=[];
+  DB.checkins=mergeCheckinLists(DB.checkins,[]);
+}
+function newerHomework(a,b){
+  if(!a) return b;
+  if(!b) return a;
+  const ta=recordFreshness(a), tb=recordFreshness(b);
+  if(ta!==tb) return ta>tb?a:b;
+  if(!!a.completed!==!!b.completed) return a.completed?a:b;
+  return a;
+}
+function mergeHomeworkLists(listA,listB){
+  const map={};
+  [].concat(listA||[], listB||[]).forEach(function(h,i){
+    if(!h || typeof h!=='object') return;
+    if(!h.id) h.id=uid();
+    if(!h.updatedAt) h.updatedAt=recordFreshness(h)||(Date.now()+i);
+    map[h.id]=newerHomework(map[h.id],h);
+  });
+  return Object.keys(map).map(function(k){return map[k];}).sort(function(a,b){
+    return String(a.date||'').localeCompare(String(b.date||'')) || (recordFreshness(a)-recordFreshness(b));
+  });
+}
+function normalizeHomeworkRecords(){
+  if(!Array.isArray(DB.homework)) DB.homework=[];
+  DB.homework=mergeHomeworkLists(DB.homework,[]);
 }
 // 作业完成期限（老数据没有 due 时，用布置日期当期限）
 function hwDue(h){ return (h&&h.due)?h.due:h.date; }
@@ -972,7 +1050,7 @@ function regenerateSchedules(){
 function ensureCheckin(dateStr, key, category, name){
   let c=getCheckin(dateStr,key);
   if(!c){
-    c={id:uid(), date:dateStr, key, category, name, status:'todo', actualMinutes:null, seconds:null, accuracy:null, createdAt:Date.now(), reviewedAt:null, pointsAwarded:false, deviceId:(DB.settings&&DB.settings.deviceId)||''};
+    c={id:uid(), date:dateStr, key, category, name, status:'todo', actualMinutes:null, seconds:null, accuracy:null, createdAt:Date.now(), updatedAt:Date.now(), reviewedAt:null, pointsAwarded:false, deviceId:(DB.settings&&DB.settings.deviceId)||''};
     DB.checkins.push(c);
     persist();
   }
@@ -1028,7 +1106,7 @@ function startTimer(key, name, category, dateStr){
   }
   if(cur && cur.key===key) return;
   const c=ensureCheckin(dateStr,key,category,name);
-  c.status='in_progress';
+  c.status='in_progress'; c.updatedAt=Date.now();
   const t={key, name, category, date:dateStr, accumulatedMs:0, running:true, lastTick:Date.now()};
   setActiveTimer(t);
   persist();
@@ -1038,7 +1116,7 @@ function startTimer(key, name, category, dateStr){
 }
 function endOtherThenStart(otherId, key, name, category, dateStr){
   const o=DB.checkins.find(function(c){ return c.id===otherId; });
-  if(o){ o.status='todo'; o.seconds=null; o.actualMinutes=null; }
+  if(o){ o.status='todo'; o.updatedAt=Date.now(); o.seconds=null; o.actualMinutes=null; }
   closeModal(); persist(); renderCurrentView();
   startTimer(key, name, category, dateStr);
 }
@@ -1065,10 +1143,10 @@ function discardFor(key, dateStr){
   const t=getActiveTimer();
   if(t && t.key===key){ discardTimer(); return; }
   const c=findCheckinAny(key, dateStr);
-  if(c){ c.status='todo'; c.seconds=null; c.actualMinutes=null; }
+  if(c){ c.status='todo'; c.updatedAt=Date.now(); c.seconds=null; c.actualMinutes=null; }
   if(key.indexOf('hw:')===0){
     const h=DB.homework.find(function(x){ return x.id===key.slice(3); });
-    if(h){ h.completed=false; h.actualMinutes=null; h.seconds=null; h.completedDate=null; h.late=false; }
+    if(h){ h.completed=false; h.updatedAt=Date.now(); h.actualMinutes=null; h.seconds=null; h.completedDate=null; h.late=false; }
   }
   clearActiveTimer(); persist(); closeTimerOverlay(); renderCurrentView();
   toast('已重置该任务');
@@ -1080,7 +1158,7 @@ function toggleTimerPause(){
 function pauseTimer(){
   const t=getActiveTimer(); if(!t||!t.running) return;
   t.accumulatedMs+=Date.now()-t.lastTick; t.running=false; setActiveTimer(t);
-  const c=getCheckin(t.date,t.key); if(c){ c.status='in_progress'; }
+  const c=getCheckin(t.date,t.key); if(c){ c.status='in_progress'; c.updatedAt=Date.now(); }
   persist();
   if(timerOverlayOpen){ updateTimerOverlay(); } else { renderCurrentView(); }
 }
@@ -1100,10 +1178,11 @@ function completeTimer(silent){
     c.seconds=sec;
     c.actualMinutes=secondsToMin(sec);
     c.completedAt=Date.now();
+    c.updatedAt=Date.now();
   }
   if(t.key.indexOf('hw:')===0){
     const h=DB.homework.find(x=>x.id===t.key.slice(3));
-    if(h){ h.completed=true; h.actualMinutes=secondsToMin(sec); h.seconds=sec; h.completedDate=t.date; h.late=(t.date>hwDue(h)); }
+    if(h){ h.completed=true; h.updatedAt=Date.now(); h.actualMinutes=secondsToMin(sec); h.seconds=sec; h.completedDate=t.date; h.late=(t.date>hwDue(h)); }
   }
   clearActiveTimer();
   persist();
@@ -1113,10 +1192,10 @@ function completeTimer(silent){
 function discardTimer(){
   const t=getActiveTimer(); if(!t) return;
   const c=getCheckin(t.date,t.key);
-  if(c && c.status==='in_progress'){ c.status='todo'; c.seconds=null; c.actualMinutes=null; }
+  if(c && c.status==='in_progress'){ c.status='todo'; c.updatedAt=Date.now(); c.seconds=null; c.actualMinutes=null; }
   if(t.key.indexOf('hw:')===0){
     const h=DB.homework.find(x=>x.id===t.key.slice(3));
-    if(h){ h.completed=false; h.actualMinutes=null; h.seconds=null; h.completedDate=null; h.late=false; }
+    if(h){ h.completed=false; h.updatedAt=Date.now(); h.actualMinutes=null; h.seconds=null; h.completedDate=null; h.late=false; }
   }
   clearActiveTimer();
   persist();
@@ -1147,10 +1226,10 @@ function startTicker(){
 
 function retryCheckin(key, dateStr){
   const c=(key.indexOf('hw:')===0)?getCheckinByKey(key):getCheckin(dateStr,key);
-  if(c){ c.status='todo'; c.seconds=null; c.actualMinutes=null; c.accuracy=null; c.reviewedAt=null; c.pointsAwarded=false; }
+  if(c){ c.status='todo'; c.updatedAt=Date.now(); c.seconds=null; c.actualMinutes=null; c.accuracy=null; c.reviewedAt=null; c.pointsAwarded=false; }
   if(key.indexOf('hw:')===0){
     const h=DB.homework.find(x=>x.id===key.slice(3));
-    if(h){ h.completed=false; h.actualMinutes=null; h.seconds=null; }
+    if(h){ h.completed=false; h.updatedAt=Date.now(); h.actualMinutes=null; h.seconds=null; }
   }
   persist(); renderCurrentView(); toast('🔄 已重置，可以重新开始计时');
 }
@@ -1160,7 +1239,7 @@ function unapproveCheckin(id){
     addPoints(-DB.points.config.perTask, '撤销审核扣回积分：'+c.name, {type:'checkin_deduction',sourceType:'checkin',sourceId:c.id});
     c.pointsAwarded=false;
   }
-  c.status='pending_review'; c.reviewedAt=null;
+  c.status='pending_review'; c.updatedAt=Date.now(); c.reviewedAt=null;
   persist(); toast('↩️ 已撤销通过，回到待审核'); renderParentCurrentTab();
 }
 
@@ -1487,7 +1566,7 @@ function showSettleDetail(){
 /* ================= 审核 ================= */
 function approveCheckin(id, accuracy){
   const c=DB.checkins.find(x=>x.id===id); if(!c) return;
-  c.status='approved'; c.reviewedAt=Date.now();
+  c.status='approved'; c.updatedAt=Date.now(); c.reviewedAt=Date.now();
   if(accuracy!=='' && accuracy!=null && !isNaN(parseFloat(accuracy))) c.accuracy=parseFloat(accuracy);
   if(!c.pointsAwarded){
     addPoints(DB.points.config.perTask, '完成打卡：'+c.name+'（'+cnMonthDay(c.date)+'）', {type:'checkin_income',sourceType:'checkin',sourceId:c.id});
@@ -1498,10 +1577,10 @@ function approveCheckin(id, accuracy){
 }
 function rejectCheckin(id){
   const c=DB.checkins.find(x=>x.id===id); if(!c) return;
-  c.status='rejected'; c.reviewedAt=Date.now();
+  c.status='rejected'; c.updatedAt=Date.now(); c.reviewedAt=Date.now();
   if(c.pointsAwarded){ addPoints(-DB.points.config.perTask, '驳回打卡扣回积分：'+c.name, {type:'checkin_deduction',sourceType:'checkin',sourceId:c.id}); c.pointsAwarded=false; }
   if(c.key && c.key.indexOf('hw:')===0){
-    const h=DB.homework.find(x=>x.id===c.key.slice(3)); if(h){ h.completed=false; h.late=false; h.completedDate=null; }
+    const h=DB.homework.find(x=>x.id===c.key.slice(3)); if(h){ h.completed=false; h.updatedAt=Date.now(); h.late=false; h.completedDate=null; }
   }
   persist(); toast('已驳回该打卡'); renderParentCurrentTab();
 }
@@ -1871,7 +1950,7 @@ function addHomework(){
   let due=document.getElementById('hwDue').value||date;
   if(due<date) due=date;
   if(!content){ toast('请填写作业内容'); return; }
-  DB.homework.push({id:uid(), date, due, subject, content, photo:hwPhoto, completed:false, by:'孩子', createdAt:Date.now()});
+  DB.homework.push({id:uid(), date, due, subject, content, photo:hwPhoto, completed:false, by:'孩子', createdAt:Date.now(), updatedAt:Date.now()});
   persist(); hwPhoto=null;
   document.getElementById('hwContent').value='';
   const pv=document.getElementById('hwPhotoPreview'); if(pv) pv.innerHTML='';
@@ -1880,7 +1959,7 @@ function addHomework(){
 }
 function toggleHomework(id){
   const h=DB.homework.find(x=>x.id===id); if(!h) return;
-  h.completed=!h.completed; persist(); renderCurrentView();
+  h.completed=!h.completed; h.updatedAt=Date.now(); persist(); renderCurrentView();
 }
 function deleteHomework(id){
   DB.homework=DB.homework.filter(x=>x.id!==id); persist(); renderCurrentView();
@@ -2893,6 +2972,7 @@ function saveTask(id){
 /* ================= 打卡审核（家长） ================= */
 function renderReview(){
   const pending=DB.checkins.filter(c=>c.status==='pending_review').sort((a,b)=>b.createdAt-a.createdAt);
+  const syncState=syncUiState();
   const pendRows=pending.map(c=>{
     const isMath=c.category==='数学';
     return '<tr>'
@@ -2904,21 +2984,22 @@ function renderReview(){
       +'<button class="btn btn-mint btn-sm" onclick="approveCheckin(\''+c.id+'\',document.getElementById(\'acc_'+c.id+'\')?document.getElementById(\'acc_'+c.id+'\').value:\'\')">✅ 通过</button> '
       +'<button class="btn btn-danger btn-sm" onclick="rejectCheckin(\''+c.id+'\')">驳回</button>'
       +'</td></tr>';
-  }).join('')||'<tr><td colspan="5" class="empty">🎉 暂无待审核的打卡</td></tr>';
+  }).join('')||'<tr><td colspan="5" class="empty">🎉 暂无待审核的打卡' + ((syncDirty||!syncReady)?'<div style="font-size:12px;color:#d64545;margin-top:6px">当前可能仍有孩子设备上的记录待同步，请不要关闭页面，系统会自动重试。</div>':'') + '</td></tr>';
   const history=DB.checkins.filter(c=>c.status!=='pending_review'&&c.status!=='in_progress'&&c.status!=='todo').sort((a,b)=>b.reviewedAt-a.reviewedAt).slice(0,40);
   const histRows=history.map(c=>'<tr><td>'+cnMonthDay(c.date)+'</td><td>'+catDot(c.category)+' '+esc(c.name)+'</td>'
     +'<td>'+(c.actualMinutes!=null?c.actualMinutes+' 分钟':'—')+'</td>'
     +'<td>'+ (c.accuracy!=null?c.accuracy+'%':'—') +'</td>'
     +'<td>'+(c.status==='approved'?'<span class="badge bg-mint">✅ 已通过'+(c.pointsAwarded?' +'+DB.points.config.perTask+'分':'')+'</span>':'<span class="badge bg-red">⚠️ 已驳回</span>')+'</td>'
     +'<td style="white-space:nowrap">'+(c.status==='approved'?'<button class="btn btn-ghost btn-sm" onclick="unapproveCheckin(\''+c.id+'\')">↩️ 撤销通过</button>':'<span style="font-size:12px;color:var(--sub)">孩子可重新打卡</span>')+'</td></tr>').join('')||'<tr><td colspan="6" class="empty">暂无历史记录</td></tr>';
-  const html='<div class="parent-tab-head"><h2>🕐 打卡审核</h2><span class="badge bg-orange">待审核 '+pending.length+' 项</span></div>'
+  const html='<div class="parent-tab-head"><h2>🕐 打卡审核</h2><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="badge bg-orange">待审核 '+pending.length+' 项</span><button class="btn btn-ghost btn-sm" onclick="retryCloudSync()">🔄 立即重新同步</button></div></div>'
+    +'<div class="panel"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><b>云端同步状态</b><div class="sync-status '+(syncState.cls||'off')+'" id="reviewSyncText" style="margin-top:6px">'+esc(syncState.text)+'</div></div><button class="btn btn-mint btn-sm" onclick="retryCloudSync()">☁️ 重新连接并补传</button></div>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7;margin-top:10px">孩子设备完成计时后，记录会先保存到本机，再由云端同步到这台 MacBook。如果几天未使用，首次连接可能较慢；系统会自动重试，收到记录后本页会自动刷新。</p></div>'
     +'<div class="panel"><h4>📨 待审核（计时器自动记录用时）</h4>'
     +'<table class="tbl"><thead><tr><th>日期</th><th>任务</th><th>实际用时</th><th>正确率（数学）</th><th>操作</th></tr></thead><tbody>'+pendRows+'</tbody></table></div>'
     +'<div class="panel"><h4>📜 审核历史</h4>'
     +'<table class="tbl"><thead><tr><th>日期</th><th>任务</th><th>用时</th><th>正确率</th><th>状态</th><th>操作</th></tr></thead><tbody>'+histRows+'</tbody></table></div>';
   document.getElementById('parentContent').innerHTML=html;
 }
-
 /* ================= 积分奖励（家长） ================= */
 let pointsLedgerFilter='all';
 function setPointsLedgerFilter(f){ pointsLedgerFilter=f; renderParentCurrentTab(); }
@@ -3276,7 +3357,7 @@ function addHomeworkByParent(){
   let due=document.getElementById('phwDue').value||date;
   if(due<date) due=date;
   if(!content){ toast('请填写作业内容'); return; }
-  DB.homework.push({id:uid(), date, due, subject, content, photo:null, completed:false, by:'家长', createdAt:Date.now()});
+  DB.homework.push({id:uid(), date, due, subject, content, photo:null, completed:false, by:'家长', createdAt:Date.now(), updatedAt:Date.now()});
   persist(); toast('📓 已添加「'+subject+'」作业'); renderParentCurrentTab();
 }
 function editHwDue(id){
@@ -3291,7 +3372,7 @@ function saveHwDue(id){
   const h=DB.homework.find(x=>x.id===id); if(!h) return;
   let due=document.getElementById('editHwDue').value||h.date;
   if(due<h.date) due=h.date;
-  h.due=due;
+  h.due=due; h.updatedAt=Date.now();
   persist(); closeModal(); renderParentCurrentTab(); toast('✅ 完成期限已更新为 '+cnMonthDay(due));
 }
 function deleteHw(id){ DB.homework=DB.homework.filter(x=>x.id!==id); persist(); renderParentCurrentTab(); toast('已删除'); }
@@ -3527,8 +3608,59 @@ function roundRect(ctx,x,y,w,h,r){
 }
 
 /* ================= 云端实时同步（Supabase + 家庭账号登录鉴权） ================= */
-let syncReady=false, syncTimer=null, cloudPushTimer=null, lastPushed=0, sbSession=null;
+let syncReady=false, syncConnecting=false, syncTimer=null, syncRetryTimer=null, cloudPushTimer=null;
+let lastPushed=0, lastSyncAt=0, sbSession=null, syncDirty=false, syncRetryDelay=3000;
 function syncCfg(){ return (DB.settings&&DB.settings.sync)||{enabled:false,url:'',anonKey:'',email:'',password:'',room:''}; }
+function loadSyncDirty(){
+  try{ syncDirty=localStorage.getItem('g3_syncDirty')==='1'; }catch(e){ syncDirty=false; }
+}
+function markSyncDirty(){
+  syncDirty=true;
+  try{ localStorage.setItem('g3_syncDirty','1'); }catch(e){}
+  updateSyncBadges();
+}
+function clearSyncDirty(){
+  syncDirty=false;
+  try{ localStorage.removeItem('g3_syncDirty'); }catch(e){}
+  updateSyncBadges();
+}
+function resetSyncRetry(){
+  if(syncRetryTimer){ clearTimeout(syncRetryTimer); syncRetryTimer=null; }
+  syncRetryDelay=3000;
+}
+function scheduleSyncRetry(){
+  if(!syncCfg().enabled || syncRetryTimer) return;
+  const delay=syncRetryDelay;
+  syncRetryDelay=Math.min(syncRetryDelay*2,60000);
+  syncRetryTimer=setTimeout(function(){ syncRetryTimer=null; initCloudSync(); }, delay);
+}
+function syncUiState(){
+  const cfg=syncCfg();
+  if(!cfg.enabled) return {text:'云端同步未启用',cls:'off'};
+  if(syncConnecting) return {text:'正在连接云端…',cls:'off'};
+  if(syncReady&&syncDirty) return {text:'有本地记录待上传，正在重试',cls:'bad'};
+  if(syncReady) return {text:'云端已同步'+(lastSyncAt?(' · '+new Date(lastSyncAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})):''),cls:'ok'};
+  return {text:'同步未连接，将自动重试',cls:'bad'};
+}
+function updateSyncBadges(){
+  const st=syncUiState();
+  const el=document.getElementById('reviewSyncText');
+  if(el){ el.textContent=st.text; el.className='sync-status '+(st.cls||'off'); }
+}
+function retryCloudSync(){
+  resetSyncRetry();
+  if(!syncCfg().enabled){ toast('请先在孩子信息中启用云端同步'); return; }
+  setSyncStatus('正在重新连接云端…','off');
+  initCloudSync();
+  toast('☁️ 正在重新连接并补传记录');
+}
+function resumeCloudSync(){
+  const cfg=syncCfg();
+  if(!cfg.enabled) return;
+  if(!syncReady){ resetSyncRetry(); initCloudSync(); }
+  else if(syncDirty){ cloudPush(); }
+  else { pollCloud(); }
+}
 function mergeCustomLibrary(){
   const ca=(DB.customLibrary&&DB.customLibrary.aids)||{};
   const cc=(DB.customLibrary&&DB.customLibrary.courses)||{};
@@ -3572,6 +3704,7 @@ function setSyncStatus(txt, cls){
   const cfg=syncCfg(); cfg.status=txt; cfg.statusClass=cls||'off';
   const el=document.getElementById('syncStatus');
   if(el){ el.textContent=txt; el.className='sync-status '+(cls||'off'); }
+  updateSyncBadges();
 }
 function cloudSnapshot(){
   const data={};
@@ -3580,21 +3713,33 @@ function cloudSnapshot(){
   if(data.settings && data.settings.sync){ data.settings.sync.password=''; data.settings.sync.email=''; }
   return data;
 }
+function mergeRemoteSnapshot(data){
+  if(!data || typeof data!=='object') return;
+  if(Array.isArray(data.checkins)) DB.checkins=mergeCheckinLists(DB.checkins,data.checkins);
+  if(Array.isArray(data.homework)) DB.homework=mergeHomeworkLists(DB.homework,data.homework);
+  persistLocal();
+}
 function applyCloudState(raw){
   try{
     const data=typeof raw==='string'?JSON.parse(raw):raw;
     if(!data||typeof data!=='object') return;
+    const merged=Object.assign({},data);
+    if(Array.isArray(data.checkins)) merged.checkins=mergeCheckinLists(DB.checkins,data.checkins);
+    if(Array.isArray(data.homework)) merged.homework=mergeHomeworkLists(DB.homework,data.homework);
     Object.keys(LS).forEach(k=>{
-      if(data[k]!==undefined){
-        if(k==='settings'&&data[k]&&DB.settings){
+      if(merged[k]!==undefined){
+        if(k==='settings'&&merged[k]&&DB.settings){
           // 保留本机设备标识与同步配置（含账号密码），其余设置以云端为准
           const dev=DB.settings.deviceId, sync=DB.settings.sync;
-          data[k].deviceId=dev; data[k].sync=sync;
+          merged[k]=Object.assign({},merged[k]);
+          merged[k].deviceId=dev; merged[k].sync=sync;
         }
-        DB[k]=data[k];
-        localStorage.setItem(LS[k], JSON.stringify(data[k]));
+        DB[k]=merged[k];
+        localStorage.setItem(LS[k], JSON.stringify(merged[k]));
       }
     });
+    normalizeCheckinRecords();
+    normalizeHomeworkRecords();
     normalizePoints();
     mergeCustomLibrary();
     const ded=settleOverduePoints();
@@ -3603,72 +3748,103 @@ function applyCloudState(raw){
     toast('☁️ 已同步最新数据');
   }catch(e){}
 }
-async function cloudPush(){
-  if(!syncReady) return;
+async function fetchCloudRow(){
   const cfg=syncCfg();
-  const data=cloudSnapshot();
-  lastPushed=Date.now();
+  const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
+  if(!res.ok){
+    const j=await res.json().catch(function(){ return {}; });
+    throw new Error('HTTP '+res.status+(j.message||j.hint?('：'+(j.message||j.hint)):''));
+  }
+  const rows=await res.json();
+  return (rows&&rows[0])?rows[0]:null;
+}
+async function cloudPush(){
+  if(!syncReady){ markSyncDirty(); return false; }
+  const cfg=syncCfg();
   try{
-    await sbFetch('workbench?on_conflict=room', {
+    const remote=await fetchCloudRow();
+    if(remote){
+      lastPushed=Math.max(Number(lastPushed||0), Number(remote.updated_at||0));
+      if(remote.data) mergeRemoteSnapshot(typeof remote.data==='string'?JSON.parse(remote.data):remote.data);
+    }
+    const now=Math.max(Date.now(), Number(lastPushed||0)+1);
+    const data=cloudSnapshot();
+    const write=await sbFetch('workbench?on_conflict=room', {
       method:'POST',
       headers:{'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'},
-      body:JSON.stringify([{room:cfg.room, data:JSON.stringify(data), updated_at:lastPushed}])
+      body:JSON.stringify([{room:cfg.room, data:JSON.stringify(data), updated_at:now}])
     });
-  }catch(e){}
+    if(!write.ok){
+      const j=await write.json().catch(function(){ return {}; });
+      throw new Error('HTTP '+write.status+(j.message||j.hint?('：'+(j.message||j.hint)):''));
+    }
+    lastPushed=now; lastSyncAt=Date.now(); clearSyncDirty(); resetSyncRetry();
+    setSyncStatus('☁️ 已同步（房间：'+cfg.room+'）','ok');
+    return true;
+  }catch(e){
+    syncReady=false;
+    markSyncDirty();
+    setSyncStatus('同步失败：'+(e.message||'网络错误')+'，将自动重试','bad');
+    scheduleSyncRetry();
+    return false;
+  }
 }
 function scheduleCloudPush(){
+  markSyncDirty();
   if(!syncReady) return;
   clearTimeout(cloudPushTimer);
   cloudPushTimer=setTimeout(cloudPush, 700);
 }
 function disableSync(){
-  syncReady=false;
+  syncReady=false; syncConnecting=false;
   if(syncTimer) clearInterval(syncTimer);
-  syncTimer=null;
+  if(syncRetryTimer) clearTimeout(syncRetryTimer);
+  syncTimer=null; syncRetryTimer=null;
 }
 async function pollCloud(){
   if(!syncReady) return;
   const cfg=syncCfg();
   try{
-    const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const rows=await res.json();
-    if(rows && rows[0]){
-      const u=rows[0].updated_at||0;
-      if(u>lastPushed){ applyCloudState(rows[0].data); lastPushed=u; }
+    if(syncDirty){ await cloudPush(); return; }
+    const row=await fetchCloudRow();
+    if(row){
+      const u=Number(row.updated_at||0);
+      if(u>lastPushed){ applyCloudState(row.data); lastPushed=u; lastSyncAt=Date.now(); }
     }else{
-      cloudPush();
+      await cloudPush();
     }
-  }catch(e){}
+  }catch(e){
+    syncReady=false;
+    setSyncStatus('同步中断：'+(e.message||'网络错误')+'，将自动重试','bad');
+    scheduleSyncRetry();
+  }
 }
 async function initCloudSync(){
   const cfg=syncCfg();
   if(!cfg.enabled) return;
+  if(syncConnecting) return;
   if(!cfg.url||!cfg.anonKey||!cfg.room){ setSyncStatus('配置不完整：请填写网址、密钥和房间码','bad'); return; }
+  syncConnecting=true;
   try{
     setSyncStatus('正在连接云端…','off');
     await ensureSbAuth();
-    const res=await sbFetch('workbench?room=eq.'+encodeURIComponent(cfg.room)+'&select=data,updated_at&limit=1');
-    if(!res.ok){
-      const j=await res.json().catch(function(){ return {}; });
-      throw new Error('HTTP '+res.status+(j.message||j.hint?('：'+(j.message||j.hint)):''));
-    }
-    const rows=await res.json();
+    const row=await fetchCloudRow();
     syncReady=true;
-    setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok');
-    if(localStorage.getItem('g3_justImported')==='1'){
-      localStorage.removeItem('g3_justImported');
-      await cloudPush();
-      toast('☁️ 已把「导入的数据」推送到云端');
-    }else if(rows && rows[0]){
-      applyCloudState(rows[0].data);
-    }else{
-      cloudPush();
-    }
+    if(row){ applyCloudState(row.data); lastPushed=Number(row.updated_at||0)||lastPushed; }
+    const justImported=localStorage.getItem('g3_justImported')==='1';
+    if(justImported){ localStorage.removeItem('g3_justImported'); await cloudPush(); toast('☁️ 已把「导入的数据」推送到云端'); }
+    else if(!row || syncDirty){ await cloudPush(); }
+    else { lastSyncAt=Date.now(); setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok'); }
     if(syncTimer) clearInterval(syncTimer);
     syncTimer=setInterval(pollCloud, 4000);
   }catch(e){
-    setSyncStatus('连接失败：'+(e.message||'未知错误')+'（仍可本地使用）','bad');
+    syncReady=false;
+    markSyncDirty();
+    setSyncStatus('连接失败：'+(e.message||'未知错误')+'，将自动重试','bad');
+    scheduleSyncRetry();
+  }finally{
+    syncConnecting=false;
+    updateSyncBadges();
   }
 }
 async function syncTestConnection(){
@@ -3783,10 +3959,10 @@ function init(){
   const at=getActiveTimer();
   if(at){
     const c=getCheckin(at.date, at.key);
-    if(c){ c.status='in_progress'; persist(); }
+    if(c){ c.status='in_progress'; c.updatedAt=Date.now(); persist(); }
     else clearActiveTimer();
   } else {
-    DB.checkins.forEach(c=>{ if(c.status==='in_progress' && (!c.deviceId || c.deviceId===DB.settings.deviceId)) c.status='todo'; });
+    DB.checkins.forEach(c=>{ if(c.status==='in_progress' && (!c.deviceId || c.deviceId===DB.settings.deviceId)){ c.status='todo'; c.updatedAt=Date.now(); } });
     persist();
   }
   document.getElementById('gearBtn').addEventListener('click', openParentGate);
@@ -3798,7 +3974,10 @@ function init(){
   if(overdueDeducted>0){ setTimeout(function(){ toast('⚠️ 已结算逾期扣分：-'+overdueDeducted+' 分（见积分明细）'); }, 1500); }
   checkAppUpdate();
   setInterval(checkAppUpdate, 10*60*1000);
-  document.addEventListener('visibilitychange', function(){ if(!document.hidden) checkAppUpdate(); });
+  document.addEventListener('visibilitychange', function(){
+    if(!document.hidden){ checkAppUpdate(); resumeCloudSync(); }
+  });
+  window.addEventListener('online', function(){ resumeCloudSync(); });
 }
 document.addEventListener('DOMContentLoaded', init);
 </script>
