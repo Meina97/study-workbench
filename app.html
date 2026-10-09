@@ -463,7 +463,7 @@ const LS = {
 };
 const LS_OLD_MATERIALS='g3_materials';
 const SS_TIMER = 'g3_activeTimer';
-const APP_VER = '2026-10-09.1';   // 版本号（每次发布更新，用于核对设备上的版本）
+const APP_VER = '2026-10-09.2';   // 版本号（每次发布更新，用于核对设备上的版本）
 
 const CATS = ['日常习惯','语文','数学','英语','兴趣'];
 const TODAY_CATS = ['语文','数学','英语','兴趣','日常习惯'];
@@ -3713,10 +3713,48 @@ function cloudSnapshot(){
   if(data.settings && data.settings.sync){ data.settings.sync.password=''; data.settings.sync.email=''; }
   return data;
 }
+function mergePointsEntries(listA,listB){
+  const map={};
+  [].concat(listA||[],listB||[]).forEach(function(x){
+    if(!x || typeof x!=='object') return;
+    const id=x.id||('pts_'+recordFreshness(x)+'_'+String(x.reason||''));
+    const prev=map[id];
+    if(!prev){ map[id]=Object.assign({},x,{id:id}); return; }
+    const merged=Object.assign({},prev,x);
+    ['reversedAt','reversalId','refunded','reverseNote'].forEach(function(k){
+      if(prev[k]!==undefined || x[k]!==undefined) merged[k]=(x[k]!==undefined?x[k]:prev[k]);
+    });
+    map[id]=merged;
+  });
+  return Object.keys(map).map(function(k){return map[k];});
+}
+function mergePointsState(localPoints, remotePoints){
+  const local=localPoints||{};
+  const remote=remotePoints||{};
+  const def=defaultPoints();
+  const config=Object.assign({},def.config,remote.config||{},local.config||{});
+  const log=mergePointsEntries(local.log||[],remote.log||[]);
+  const redemptions=mergePointsEntries(local.redemptions||[],remote.redemptions||[]);
+  const settled=Object.assign({},remote.settled||{},local.settled||{});
+  const settleLogs=mergePointsEntries(local.settleLogs||[],remote.settleLogs||[]);
+  const lastLocal=Number((local.lastSettle&&local.lastSettle.at)||0);
+  const lastRemote=Number((remote.lastSettle&&remote.lastSettle.at)||0);
+  return {
+    config:config,
+    settled:settled,
+    settleFrom:local.settleFrom||remote.settleFrom||'',
+    log:log,
+    rewards:(Array.isArray(local.rewards)&&local.rewards.length)?local.rewards:((Array.isArray(remote.rewards)&&remote.rewards.length)?remote.rewards:def.rewards),
+    redemptions:redemptions,
+    settleLogs:settleLogs,
+    lastSettle:(lastLocal>=lastRemote?local.lastSettle:remote.lastSettle)||null
+  };
+}
 function mergeRemoteSnapshot(data){
   if(!data || typeof data!=='object') return;
   if(Array.isArray(data.checkins)) DB.checkins=mergeCheckinLists(DB.checkins,data.checkins);
   if(Array.isArray(data.homework)) DB.homework=mergeHomeworkLists(DB.homework,data.homework);
+  if(data.points) DB.points=mergePointsState(DB.points,data.points);
   persistLocal();
 }
 function applyCloudState(raw){
@@ -3726,6 +3764,7 @@ function applyCloudState(raw){
     const merged=Object.assign({},data);
     if(Array.isArray(data.checkins)) merged.checkins=mergeCheckinLists(DB.checkins,data.checkins);
     if(Array.isArray(data.homework)) merged.homework=mergeHomeworkLists(DB.homework,data.homework);
+    if(data.points) merged.points=mergePointsState(DB.points,data.points);
     Object.keys(LS).forEach(k=>{
       if(merged[k]!==undefined){
         if(k==='settings'&&merged[k]&&DB.settings){
@@ -3830,11 +3869,18 @@ async function initCloudSync(){
     await ensureSbAuth();
     const row=await fetchCloudRow();
     syncReady=true;
-    if(row){ applyCloudState(row.data); lastPushed=Number(row.updated_at||0)||lastPushed; }
     const justImported=localStorage.getItem('g3_justImported')==='1';
-    if(justImported){ localStorage.removeItem('g3_justImported'); await cloudPush(); toast('☁️ 已把「导入的数据」推送到云端'); }
-    else if(!row || syncDirty){ await cloudPush(); }
-    else { lastSyncAt=Date.now(); setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok'); }
+    if(justImported){
+      localStorage.removeItem('g3_justImported');
+      if(row && row.data) mergeRemoteSnapshot(typeof row.data==='string'?JSON.parse(row.data):row.data);
+      await cloudPush();
+      toast('☁️ 已把「导入的数据」合并并推送到云端');
+    }else{
+      if(row) applyCloudState(row.data);
+      if(row) lastPushed=Number(row.updated_at||0)||lastPushed;
+      if(!row || syncDirty){ await cloudPush(); }
+      else { lastSyncAt=Date.now(); setSyncStatus('☁️ 已连接云端（房间：'+cfg.room+'）','ok'); }
+    }
     if(syncTimer) clearInterval(syncTimer);
     syncTimer=setInterval(pollCloud, 4000);
   }catch(e){
