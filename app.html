@@ -463,7 +463,7 @@ const LS = {
 };
 const LS_OLD_MATERIALS='g3_materials';
 const SS_TIMER = 'g3_activeTimer';
-const APP_VER = '2026-10-09.2';   // 版本号（每次发布更新，用于核对设备上的版本）
+const APP_VER = '2026-10-11.1';   // 版本号（每次发布更新，用于核对设备上的版本）
 
 const CATS = ['日常习惯','语文','数学','英语','兴趣'];
 const TODAY_CATS = ['语文','数学','英语','兴趣','日常习惯'];
@@ -786,6 +786,9 @@ function mergeHomeworkLists(listA,listB){
 function normalizeHomeworkRecords(){
   if(!Array.isArray(DB.homework)) DB.homework=[];
   DB.homework=mergeHomeworkLists(DB.homework,[]);
+}
+function activeHomework(){
+  return (DB.homework||[]).filter(function(h){ return h && !h.deleted; });
 }
 // 作业完成期限（老数据没有 due 时，用布置日期当期限）
 function hwDue(h){ return (h&&h.due)?h.due:h.date; }
@@ -1362,7 +1365,7 @@ function settleOverduePoints(){
       const done=!!(c&&(c.status==='approved'||c.status==='pending_review'));
       if(!done) missing++;
     });
-    DB.homework.forEach(function(h){ if(hwDue(h)===ds && !h.completed) missing++; });
+    activeHomework().forEach(function(h){ if(hwDue(h)===ds && !h.completed) missing++; });
     if(!missing){ items.push({forDate:ds, overdueDays:overdueDays, missing:0, per:0, amount:0, note:'✅ 全部完成'+(habitSkipped?('（已忽略 '+habitSkipped+' 项日常习惯）'):'')}); continue; }
     let per=parseFloat(cfg.overdueBase)||0;
     if(cfg.overdueDouble) per=per*Math.pow(2, Math.max(0, overdueDays-1));
@@ -1632,7 +1635,7 @@ function statusBadge(c){
     default: return '<span class="status-badge st-todo">未开始</span>';
   }
 }
-function taskCardHTML(item, dateStr){
+function taskCardHTML(item, dateStr, extraActions){
   const c=item.checkin;
   const key=esc(item.key);
   const name=esc(item.name);
@@ -1662,7 +1665,7 @@ function taskCardHTML(item, dateStr){
     +(meta?'<div class="task-meta">'+meta+'</div>':'')
     +hwLine
     +'</div>'
-    +'<div class="task-actions">'+actions+'</div></div>';
+    +'<div class="task-actions">'+actions+(extraActions||'')+'</div></div>';
 }
 
 const CAT_ICONS={'语文':'📖','数学':'🔢','英语':'🔤','兴趣':'🎨','日常习惯':'🌞'};
@@ -1670,7 +1673,7 @@ function renderToday(){
   const ds=todayStr();
   const wd=weekdayCN(ds);
   const items=buildDayTasks(ds);
-  const hwItems=DB.homework.filter(h=>hwVisible(h,ds)).sort((a,b)=>String(hwDue(a)).localeCompare(String(hwDue(b))));
+  const hwItems=activeHomework().filter(h=>hwVisible(h,ds)).sort((a,b)=>String(hwDue(a)).localeCompare(String(hwDue(b))));
   const t=new Date();
   const grouped={};
   items.forEach(it=>{ (grouped[it.category]=grouped[it.category]||[]).push(it); });
@@ -1700,8 +1703,9 @@ function renderToday(){
       const hk='hw:'+h.id;
       const hc=getCheckinByKey(hk);
       const hName='📓 '+h.content;
+      const deleteBtn=(canChildDeleteHomework(h)&&(!hc||hc.status==='todo'))?'<button class="btn btn-danger btn-sm" onclick="requestDeleteHomework(\''+h.id+'\')">🗑 删除</button>':'';
       if(hc){
-        body+=taskCardHTML({key:hk, category:cat, name:hName, tag:'📓 学校作业', estimatedMinutes:null, checkin:hc}, ds);
+        body+=taskCardHTML({key:hk, category:cat, name:hName, tag:'📓 学校作业', estimatedMinutes:null, checkin:hc}, ds, deleteBtn);
       } else if(h.completed){
         body+='<div class="task-card cat-'+cat+'"><div class="task-info"><div class="task-name" style="text-decoration:line-through;color:var(--sub)">'+esc(hName)+'</div>'
           +'<div class="task-meta">'+hwDueText(h,ds)+'</div></div>'
@@ -1711,6 +1715,7 @@ function renderToday(){
           +'<div class="task-meta">'+hwDueText(h,ds)+'</div></div>'
           +'<div class="task-actions">'
           +'<button class="btn btn-play btn-sm" onclick="startTimer(\''+hk+'\',\''+esc(hName).replace(/'/g,"\\'")+'\',\''+cat+'\',\''+ds+'\')">▶️ 计时完成</button>'
+          +deleteBtn
           +'</div></div>';
       }
     });
@@ -1720,7 +1725,6 @@ function renderToday(){
   });
   document.getElementById('mainContent').innerHTML=greet+body;
 }
-
 /* ================= 进度总览 ================= */
 function monthTasksStats(ms){
   const {y,m}=parseMonth(ms);
@@ -1961,13 +1965,40 @@ function toggleHomework(id){
   const h=DB.homework.find(x=>x.id===id); if(!h) return;
   h.completed=!h.completed; h.updatedAt=Date.now(); persist(); renderCurrentView();
 }
-function deleteHomework(id){
-  DB.homework=DB.homework.filter(x=>x.id!==id); persist(); renderCurrentView();
+function canChildDeleteHomework(h){
+  if(!h) return false;
+  return h.by==='孩子' || !h.by;
 }
+function requestDeleteHomework(id){
+  const h=DB.homework.find(x=>x.id===id);
+  if(!h){ toast('这条作业已经不存在'); return; }
+  if(!canChildDeleteHomework(h)){ toast('家长录入的作业需在家长后台删除'); return; }
+  const c=getCheckinByKey('hw:'+id);
+  if(c && c.status!=='todo'){
+    toast(c.status==='in_progress'?'请先点“放弃”结束计时，再删除':'这条作业已经开始打卡，需家长删除');
+    return;
+  }
+  openModal('<h3>🗑 删除这条作业？</h3>'
+    +'<p style="font-size:15px;color:#555c7e;line-height:1.7">'+esc(h.content)+'</p>'
+    +'<p style="font-size:12.5px;color:var(--sub);line-height:1.7">删除后会从今日打卡、作业本和云端同步中移除。此操作不能撤销。</p>'
+    +'<div class="form-actions"><button class="btn btn-ghost" onclick="closeModal()">取消</button>'
+    +'<button class="btn btn-danger" onclick="doDeleteHomework(\''+id+'\')">确认删除</button></div>');
+}
+function doDeleteHomework(id){
+  const h=DB.homework.find(x=>x.id===id);
+  if(!h){ closeModal(); return; }
+  h.deleted=true; h.deletedAt=Date.now(); h.updatedAt=Date.now();
+  DB.checkins=DB.checkins.filter(function(c){ return c.key!=='hw:'+id; });
+  const t=getActiveTimer();
+  if(t && t.key==='hw:'+id){ clearActiveTimer(); closeTimerOverlay(); }
+  persist(); closeModal(); renderCurrentView();
+  toast('🗑 已删除这条作业');
+}
+function deleteHomework(id){ requestDeleteHomework(id); }
 function renderHomework(){
   const today=todayStr();
   const groups={};
-  DB.homework.slice().sort((a,b)=>b.createdAt-a.createdAt).forEach(h=>{ (groups[h.date]=groups[h.date]||[]).push(h); });
+  activeHomework().slice().sort((a,b)=>b.createdAt-a.createdAt).forEach(h=>{ (groups[h.date]=groups[h.date]||[]).push(h); });
   let list='';
   Object.keys(groups).sort().reverse().forEach(ds=>{
     const items=groups[ds].map(h=>{
@@ -2733,7 +2764,7 @@ function toggleHoliday(ds){
 }
 function showParentDay(ds){
   const items=buildDayTasks(ds);
-  const hwItems=DB.homework.filter(function(h){ return h.date===ds; });
+  const hwItems=activeHomework().filter(function(h){ return h.date===ds; });
   const moved=(DB.skips||[]).filter(function(sk){ return sk.date===ds; });
   let rows='';
   items.forEach(function(it){
@@ -2838,7 +2869,7 @@ function doMoveAll(fromDate){
     if(done) return;
     if(moveAnyTask(fromDate, it.key, target, true)) n++;
   });
-  DB.homework.filter(function(h){ return h.date===fromDate && !h.completed; }).forEach(function(h){
+  activeHomework().filter(function(h){ return h.date===fromDate && !h.completed; }).forEach(function(h){
     if(moveAnyTask(fromDate, 'hw:'+h.id, target, true)) n++;
   });
   persist(); closeModal(); renderParentCurrentTab();
@@ -3217,7 +3248,7 @@ function weekCompletion(){
     let total=items.length;
     let done=items.filter(it=>it.checkin&&it.checkin.status==='approved').length;
     // 学校作业也计入当日任务（与孩子端「今日打卡」展示一致）
-    DB.homework.filter(function(h){ return hwVisible(h,ds); }).forEach(function(h){
+    activeHomework().filter(function(h){ return hwVisible(h,ds); }).forEach(function(h){
       total++;
       if(h.completed) done++;
     });
@@ -3333,7 +3364,7 @@ function renderHwParent(){
     +'<div class="form-row"><label>作业内容（一条一条录入）</label><input id="phwContent" placeholder="如：语文第3课生字抄写；数学练习册P20-22"></div>'
     +'<div><button class="btn btn-primary" onclick="addHomeworkByParent()">＋ 添加作业</button>'
     +'<span style="font-size:12.5px;color:var(--sub);margin-left:10px">添加后自动出现在孩子端「今日打卡」对应学科，孩子需计时完成</span></div></div>';
-  const list=DB.homework.slice().sort((a,b)=>b.createdAt-a.createdAt).map(h=>{
+  const list=activeHomework().slice().sort((a,b)=>b.createdAt-a.createdAt).map(h=>{
     const hc=getCheckinByKey('hw:'+h.id);
     const stat=hc?statusBadge(hc):(h.completed?'<span class="badge bg-mint">✅ 已完成</span>':'<span class="badge bg-gray">待打卡</span>');
     return '<tr>'
